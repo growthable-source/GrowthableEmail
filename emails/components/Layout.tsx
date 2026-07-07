@@ -5,13 +5,17 @@ import * as React from 'react';
 
 export const BUSINESS_ADDRESS = '27 Red Ash Drive, Woonona NSW 2517, Australia';
 
-// Growthable brand kit — derived from the logo (navy wordmark, pink arrow accent).
+// Growthable brand kit — exact values from the brand SVGs (navy #34475B, pink #F03E6A).
+// PNG assets are served by the pipeline's own web service (app/static).
+const ASSETS = 'https://growthableemail.onrender.com/assets';
 export const BRAND = {
-  logoUrl: 'https://growthable.io/brand/logo.jpg',
-  navy: '#38445B',        // headings / body text
-  navyDark: '#2E3A4F',
-  pink: '#EF4B6A',        // accent, CTAs, links
-  pinkTint: '#FDEFF2',    // soft callout background
+  logoUrl: `${ASSETS}/growthable-logo.png`,            // navy wordmark, transparent bg
+  logoWhiteUrl: `${ASSETS}/growthable-logo-white.png`, // white wordmark for dark panels
+  iconUrl: `${ASSETS}/growthable-icon.png`,            // standalone "g" device
+  navy: '#34475B',        // headings / body text (brand exact)
+  navyDark: '#2A3A4C',
+  pink: '#F03E6A',        // accent, CTAs, links (brand exact)
+  pinkTint: '#FDEEF2',    // soft callout background
   cream: '#F7F5F2',       // email canvas
   cardBorder: '#E8EAEE',
   grey: '#7C8494',        // secondary text

@@ -41,12 +41,20 @@ Workflow you must follow, in order:
      no negative margins, no <video>.
 
 BRAND KIT (Growthable) — apply to every custom design:
-- Canvas is a white rounded card on cream; the shell provides it. Inside, build with
-  generous whitespace (24-32px vertical rhythm).
-- Colors: navy #2E3A4F (headings, weight 700) and #38445B (body); pink #EF4B6A
-  (accent, CTAs, links, small highlights); soft tints for panels: #F6F7F9 (neutral),
-  #FDEFF2 (pink), #EAF6EE (success green #2E7D46), #FEF3E7 (warm orange note);
-  borders #E8EAEE. Never set long body text in pink; never put pink text on navy.
+- Canvas is a white rounded card on cream; the shell provides it (including the navy
+  wordmark logo at the top — don't repeat it). Inside, build with generous whitespace
+  (24-32px vertical rhythm).
+- Colors (exact): navy #34475B (headings weight 700, body text) with #2A3A4C for extra
+  contrast; pink #F03E6A (accent, CTAs, links, small highlights); soft tints for
+  panels: #F6F7F9 (neutral), #FDEEF2 (pink), #EAF6EE (success green #2E7D46),
+  #FEF3E7 (warm orange note); borders #E8EAEE. Never set long body text in pink;
+  never put pink text on navy.
+- Brand assets (transparent PNGs, absolute URLs):
+  https://growthableemail.onrender.com/assets/growthable-logo-white.png — white
+  wordmark, ONLY on navy (#34475B) or pink (#F03E6A) panels, e.g. a dark hero band;
+  https://growthableemail.onrender.com/assets/growthable-icon.png — the "g" arrow
+  device, good small (40-64px) as a section accent or in a dark hero corner.
+  Never place the white logo on light backgrounds.
 - Type: system sans (Helvetica). h1 26px/34px 700; section text 15-16px/25px; small
   meta 12-13px #7C8494.
 - Buttons are PILLS: <a href="…" style="display:inline-block;background-color:#EF4B6A;

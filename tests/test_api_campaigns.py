@@ -28,6 +28,13 @@ async def test_healthz(client):
     assert resp.status_code == 200
 
 
+async def test_brand_assets_served(client):
+    for asset in ("growthable-logo.png", "growthable-logo-white.png", "growthable-icon.png"):
+        resp = await client.get(f"/assets/{asset}")
+        assert resp.status_code == 200, asset
+        assert resp.headers["content-type"] == "image/png"
+
+
 async def test_campaign_routes_require_api_key(client):
     for headers in ({}, {"x-api-key": "wrong"}):
         resp = await client.post("/campaigns", json={}, headers={"x-api-key": "", **headers})
