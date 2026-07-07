@@ -1,0 +1,31 @@
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from app.config import get_settings
+from app.db import create_pool
+from app.routers import campaigns
+
+
+def create_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if not hasattr(app.state, "settings"):  # tests inject state directly
+            app.state.settings = get_settings()
+            app.state.pool = await create_pool(app.state.settings.database_url)
+            yield
+            await app.state.pool.close()
+        else:
+            yield
+
+    app = FastAPI(title="growthable-email", lifespan=lifespan)
+    app.include_router(campaigns.router)
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"ok": True}
+
+    return app
+
+
+app = create_app()

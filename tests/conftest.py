@@ -29,3 +29,18 @@ async def _clean_tables(pool):
         "suppressions, jobs cascade"
     )
     yield
+
+
+@pytest.fixture
+async def client(pool):
+    import httpx as _httpx
+
+    from app.main import create_app
+    from tests.helpers import make_settings
+
+    app = create_app()
+    app.state.pool = pool
+    app.state.settings = make_settings()
+    transport = _httpx.ASGITransport(app=app)
+    async with _httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        yield c
