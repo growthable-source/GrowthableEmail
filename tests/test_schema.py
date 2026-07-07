@@ -7,6 +7,18 @@ async def test_all_tables_exist(pool):
             "events", "suppressions", "jobs"} <= names
 
 
+async def test_bot_tables_exist(pool):
+    rows = await pool.fetch(
+        "select table_name from information_schema.tables where table_schema='public'")
+    assert {"bot_sessions", "slack_events"} <= {r["table_name"] for r in rows}
+
+
+async def test_campaigns_have_content_and_seed_tested(pool):
+    cols = {r["column_name"] for r in await pool.fetch(
+        "select column_name from information_schema.columns where table_name='campaigns'")}
+    assert {"content", "seed_tested_at"} <= cols
+
+
 async def test_sends_unique_per_campaign_contact(pool):
     cid = await pool.fetchval(
         "insert into campaigns (name, subject, template_ref, template_version) "
