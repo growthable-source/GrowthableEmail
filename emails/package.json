@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "email dev",
-    "test": "tsx --test tests/render.test.tsx"
+    "test": "tsx --test tests/render.test.tsx tests/newsletter.test.tsx"
   },
   "dependencies": {
     "@react-email/components": "^0.0.31",
