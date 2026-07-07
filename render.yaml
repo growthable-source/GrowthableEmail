@@ -33,6 +33,16 @@ services:
         sync: false
       - key: ALERT_WEBHOOK_URL
         sync: false
+      - key: SLACK_ENABLED
+        value: "false"
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: SLACK_CHANNEL_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
   - type: worker
     name: growthable-email-worker
     runtime: docker

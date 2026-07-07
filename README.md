@@ -55,6 +55,36 @@ dispatching campaigns and posts to ALERT_WEBHOOK_URL. Un-pause by fixing the cau
 setting campaign status back to 'dispatching' in Supabase. Check the report endpoint daily
 during ramp. SEND_RPS stays 2 until Resend approves a rate increase.
 
+### Slack bot
+Create the Slack app from this manifest (api.slack.com/apps → Create New App → From manifest):
+
+    display_information:
+      name: Growthable Email
+    features:
+      bot_user:
+        display_name: email-bot
+        always_online: true
+    oauth_config:
+      scopes:
+        bot: [app_mentions:read, channels:history, groups:history, chat:write]
+    settings:
+      event_subscriptions:
+        request_url: https://growthableemail.onrender.com/slack/events
+        bot_events: [app_mention, message.channels, message.groups]
+      interactivity:
+        is_enabled: true
+        request_url: https://growthableemail.onrender.com/slack/interactions
+
+Install to the workspace → copy the Bot User OAuth Token (SLACK_BOT_TOKEN) and, from
+Basic Information, the Signing Secret (SLACK_SIGNING_SECRET). Create a private channel
+(e.g. #email-campaigns), /invite the bot, and copy the channel ID from the channel's
+details pane (SLACK_CHANNEL_ID). Set SLACK_ENABLED=true + ANTHROPIC_API_KEY on both
+Render services. Apply supabase/migrations/0002_bot.sql.
+
+Usage: tag @email-bot in the channel and describe the campaign. It will confirm the
+audience tag, draft copy, seed-test to SEED_EMAILS, and post Send/Cancel buttons.
+The seed test is mandatory; the daily cap and kill rules still apply.
+
 ### Go-live checklist (spec §11.9)
 - [ ] Seed test: `POST /campaigns/{id}/test` → inspect in Gmail: DKIM=news subdomain pass,
       List-Unsubscribe header present, one-click unsub works, plain-text part present,
