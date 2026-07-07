@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: growthable-email-api
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    envVars: &env
+      - key: DATABASE_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_WEBHOOK_SECRET
+        sync: false
+      - key: GHL_PI_TOKEN
+        sync: false
+      - key: GHL_LOCATION_ID
+        sync: false
+      - key: GHL_WEBHOOK_SECRET
+        sync: false
+      - key: UNSUB_SIGNING_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: FROM_EMAIL
+        sync: false
+      - key: SEND_RPS
+        value: "2"
+      - key: DAILY_SEND_CAP
+        value: "500"
+      - key: SEED_EMAILS
+        sync: false
+      - key: ALERT_WEBHOOK_URL
+        sync: false
+  - type: worker
+    name: growthable-email-worker
+    runtime: docker
+    plan: starter
+    dockerCommand: python -m app.worker
+    envVars: *env
