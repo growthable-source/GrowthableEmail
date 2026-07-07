@@ -1,0 +1,144 @@
+import copy
+import json
+from types import SimpleNamespace
+
+from app.services.bot import BotEngine, process_bot_turns
+from app.services.jobs import enqueue
+from tests.helpers import make_settings
+
+
+class Block(SimpleNamespace):
+    def model_dump(self, mode="json"):
+        return {k: v for k, v in vars(self).items()}
+
+
+def text_block(t):
+    return Block(type="text", text=t)
+
+
+def tool_block(name, input, id="tu_1"):
+    return Block(type="tool_use", name=name, input=input, id=id)
+
+
+class FakeAnthropic:
+    """Scripted responses; records requests."""
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.requests = []
+        self.messages = self
+
+    async def create(self, **kwargs):
+        # snapshot: the engine mutates the same messages list after the call
+        self.requests.append(copy.deepcopy(kwargs))
+        content = self._responses.pop(0)
+        return SimpleNamespace(content=content, stop_reason="tool_use" if any(
+            b.type == "tool_use" for b in content) else "end_turn")
+
+
+class FakeSlack:
+    def __init__(self):
+        self.posts = []
+
+    async def post_message(self, channel, text=None, blocks=None, thread_ts=None):
+        self.posts.append({"channel": channel, "text": text, "blocks": blocks,
+                           "thread_ts": thread_ts})
+        return "999.001"
+
+
+class FakeGHL:
+    async def list_tags(self):
+        return ["newsletter", "vip"]
+
+
+CONTENT = {"headline": "Hello", "sections": [{"paragraphs": ["World."]}]}
+
+
+def make_engine(pool, responses, slack=None):
+    slack = slack or FakeSlack()
+    engine = BotEngine(pool=pool, settings=make_settings(), ghl=FakeGHL(), slack=slack,
+                       resend=None, client=FakeAnthropic(responses))
+    return engine, slack
+
+
+TURN = {"channel": "C0TEST", "thread_ts": "100.1", "user": "URYAN", "text": "<@UBOT> hi"}
+
+
+async def test_plain_reply_posts_to_thread_and_saves_session(pool):
+    engine, slack = make_engine(pool, [[text_block("Hello Ryan! What campaign?")]])
+    await engine.handle_turn(TURN)
+    assert slack.posts[0]["thread_ts"] == "100.1"
+    assert "What campaign" in slack.posts[0]["text"]
+    session = await pool.fetchrow("select messages from bot_sessions where thread_ts='100.1'")
+    messages = json.loads(session["messages"])
+    assert messages[0]["role"] == "user" and messages[-1]["role"] == "assistant"
+
+
+async def test_tool_call_creates_campaign_and_links_session(pool):
+    engine, slack = make_engine(pool, [
+        [tool_block("create_campaign", {"name": "July", "subject": "Big",
+                                        "tag": "newsletter", "content": CONTENT})],
+        [text_block("Created!")],
+    ])
+    await engine.handle_turn(TURN)
+    campaign = await pool.fetchrow("select * from campaigns")
+    assert campaign["template_ref"] == "newsletter"
+    assert json.loads(campaign["content"]) == CONTENT
+    assert json.loads(campaign["audience_filter"]) == [
+        {"field": "tags", "operator": "eq", "value": "newsletter"}]
+    assert (await pool.fetchval("select campaign_id from bot_sessions")) == campaign["id"]
+    # tool result went back in ONE user message
+    second_request = engine._client.requests[1]
+    tool_results = second_request["messages"][-1]
+    assert tool_results["role"] == "user"
+    assert tool_results["content"][0]["type"] == "tool_result"
+
+
+async def test_propose_send_requires_seed_test(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version) "
+        "values ('x', 's', 'newsletter', 'v1') returning id")
+    engine, slack = make_engine(pool, [
+        [tool_block("propose_send", {"campaign_id": str(cid)})],
+        [text_block("You need a seed test first.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "seed test" in result["error"].lower()
+    assert all(p["blocks"] is None for p in slack.posts)  # no approval buttons posted
+
+
+async def test_propose_send_posts_approval_buttons_after_seed(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, seed_tested_at) "
+        "values ('July', 'Big', 'newsletter', 'v1', now()) returning id")
+    engine, slack = make_engine(pool, [
+        [tool_block("propose_send", {"campaign_id": str(cid),
+                                     "when_iso": "2026-07-10T09:00:00+10:00"})],
+        [text_block("Awaiting approval.")],
+    ])
+    await engine.handle_turn(TURN)
+    buttons = next(p for p in slack.posts if p["blocks"])
+    action_ids = [e["action_id"] for e in buttons["blocks"][-1]["elements"]]
+    assert action_ids == ["approve_send", "cancel_send"]
+    value = json.loads(buttons["blocks"][-1]["elements"][0]["value"])
+    assert value == {"campaign_id": str(cid), "when": "2026-07-10T09:00:00+10:00"}
+
+
+async def test_claude_error_posts_apology_and_completes_job(pool):
+    class ExplodingClient:
+        class messages:
+            @staticmethod
+            async def create(**kwargs):
+                raise RuntimeError("api down")
+    slack = FakeSlack()
+    engine = BotEngine(pool=pool, settings=make_settings(), ghl=FakeGHL(), slack=slack,
+                       resend=None, client=ExplodingClient())
+    await engine.handle_turn(TURN)
+    assert "wrong" in slack.posts[0]["text"].lower() or "error" in slack.posts[0]["text"].lower()
+
+
+async def test_process_bot_turns_drains_queue(pool):
+    await enqueue(pool, "bot_turn", TURN)
+    engine, slack = make_engine(pool, [[text_block("hi")]])
+    assert await process_bot_turns(pool, engine) == 1
+    assert (await pool.fetchval("select state from jobs")) == "completed"
