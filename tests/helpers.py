@@ -23,6 +23,11 @@ def make_settings(**overrides) -> Settings:
         send_rps=1000.0,
         daily_send_cap=500,
         seed_emails="seed@growthable.io",
+        slack_enabled=True,
+        slack_bot_token="xoxb-test",
+        slack_signing_secret="slack-signing-secret",
+        slack_channel_id="C0TEST",
+        anthropic_api_key="sk-ant-test",
     )
     defaults.update(overrides)
     return Settings(**defaults)

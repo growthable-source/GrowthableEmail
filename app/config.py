@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     daily_send_cap: int = 500
     seed_emails: str = ""
     alert_webhook_url: str | None = None
+    slack_enabled: bool = False
+    slack_bot_token: str = ""
+    slack_signing_secret: str = ""
+    slack_channel_id: str = ""
+    anthropic_api_key: str = ""
+    bot_timezone: str = "Australia/Sydney"
 
     @property
     def seed_list(self) -> list[str]:
