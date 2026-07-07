@@ -27,6 +27,10 @@ def create_app() -> FastAPI:
     async def healthz():
         return {"ok": True}
 
+    @app.get("/")
+    async def root():
+        return {"service": "growthable-email", "docs": "/docs", "health": "/healthz"}
+
     return app
 
 
