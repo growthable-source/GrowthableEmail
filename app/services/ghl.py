@@ -1,0 +1,95 @@
+import asyncio
+import logging
+from typing import AsyncIterator
+
+import httpx
+
+from app.services.ratelimit import RateLimiter
+
+log = logging.getLogger(__name__)
+
+BASE_URL = "https://services.leadconnectorhq.com"
+API_VERSION = "2021-07-28"
+MAX_ATTEMPTS = 3
+
+
+class GHLError(Exception):
+    pass
+
+
+def _parse_contact(raw: dict) -> dict:
+    return {
+        "ghl_contact_id": raw["id"],
+        "email": (raw.get("email") or "").strip().lower(),
+        "first_name": raw.get("firstNameRaw") or raw.get("firstName")
+        or raw.get("firstNameLowerCase") or "",
+        "last_name": raw.get("lastNameRaw") or raw.get("lastName")
+        or raw.get("lastNameLowerCase") or "",
+        "tags": raw.get("tags") or [],
+        "dnd": bool(raw.get("dnd")),
+        "custom": {f["id"]: f.get("value") for f in raw.get("customFields") or []},
+        "search_after": raw.get("searchAfter"),
+    }
+
+
+class GHLClient:
+    def __init__(self, token: str, location_id: str, rps: float = 8.0,
+                 backoff_base: float = 1.0):
+        self.location_id = location_id
+        self._limiter = RateLimiter(rps)
+        self._backoff_base = backoff_base
+        self._headers = {
+            "Authorization": f"Bearer {token}",
+            "Version": API_VERSION,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+    async def _request(self, method: str, path: str, json_body: dict | None = None) -> dict:
+        last_error: Exception | None = None
+        for attempt in range(MAX_ATTEMPTS):
+            await self._limiter.wait()
+            try:
+                async with httpx.AsyncClient(base_url=BASE_URL, headers=self._headers,
+                                             timeout=30) as client:
+                    resp = await client.request(method, path, json=json_body)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                await asyncio.sleep(self._backoff_base * 2 ** attempt)
+                continue
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_error = GHLError(f"{method} {path} -> {resp.status_code}")
+                await asyncio.sleep(self._backoff_base * 2 ** attempt)
+                continue
+            if resp.status_code >= 400:
+                raise GHLError(f"{method} {path} -> {resp.status_code}: {resp.text[:500]}")
+            return resp.json() if resp.content else {}
+        raise GHLError(f"{method} {path} failed after {MAX_ATTEMPTS} attempts: {last_error}")
+
+    async def search_contacts(self, filters: list[dict],
+                              page_limit: int = 100) -> AsyncIterator[dict]:
+        search_after = None
+        while True:
+            body: dict = {"locationId": self.location_id, "pageLimit": page_limit}
+            if filters:
+                body["filters"] = filters
+            if search_after:
+                body["searchAfter"] = search_after
+            data = await self._request("POST", "/contacts/search", body)
+            contacts = data.get("contacts") or []
+            if not contacts:
+                return
+            for raw in contacts:
+                yield _parse_contact(raw)
+            search_after = _parse_contact(contacts[-1])["search_after"]
+            if len(contacts) < page_limit or not search_after:
+                return
+
+    async def add_tags(self, contact_id: str, tags: list[str]) -> None:
+        await self._request("POST", f"/contacts/{contact_id}/tags", {"tags": tags})
+
+    async def set_dnd_email(self, contact_id: str) -> None:
+        await self._request("PUT", f"/contacts/{contact_id}", {
+            "dndSettings": {"Email": {"status": "active",
+                                      "message": "Suppressed by email pipeline"}},
+        })
