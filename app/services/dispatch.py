@@ -68,6 +68,14 @@ async def requeue_stale(pool, stale_minutes: int = 10) -> int:
     return int(result.split()[-1])
 
 
+async def promote_scheduled(pool) -> int:
+    """Activate scheduled campaigns whose time has arrived."""
+    result = await pool.execute(
+        "update campaigns set status='dispatching' "
+        "where status='scheduled' and scheduled_at <= now()")
+    return int(result.split()[-1])
+
+
 def _unsub_url(settings: Settings, email: str, campaign_id) -> str:
     token = make_token(email, str(campaign_id), settings.unsub_signing_secret)
     return f"{settings.public_base_url}/u/{token}"
@@ -142,7 +150,8 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
     sent_count = 0
     for campaign_id, sends in by_campaign.items():
         campaign = await pool.fetchrow(
-            "select subject, template_ref from campaigns where id=$1", campaign_id)
+            "select subject, template_ref, content from campaigns where id=$1", campaign_id)
+        content = json.loads(campaign["content"])
         props_list = []
         for send in sends:
             contact = await pool.fetchrow(
@@ -150,6 +159,7 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
                 "where ghl_contact_id=$1", send["ghl_contact_id"])
             custom = json.loads(contact["custom"]) if contact else {}
             props_list.append({
+                **content,
                 "firstName": (contact["first_name"] if contact else "") or None,
                 "lastName": (contact["last_name"] if contact else "") or None,
                 **custom,

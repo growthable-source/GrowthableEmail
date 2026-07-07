@@ -1,7 +1,10 @@
 import httpx
 import respx
 
-from app.services.dispatch import enqueue_campaign_sends, process_send_queue, requeue_stale
+import json as _json
+
+from app.services.dispatch import (enqueue_campaign_sends, process_send_queue,
+                                   promote_scheduled, requeue_stale)
 from app.services.resend_client import ResendClient
 from app.services.suppressions import add_suppression
 from tests.helpers import make_settings
@@ -100,3 +103,36 @@ async def test_requeue_stale_recovers_crashed_sends(pool):
     await pool.execute("update sends set next_attempt_at = now() - interval '20 minutes'")
     assert await requeue_stale(pool) == 1
     assert (await pool.fetchval("select status from sends")) == "queued"
+
+
+@respx.mock
+async def test_campaign_content_merged_into_render_props(pool):
+    route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_1"}))
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status, content) "
+        "values ('bot camp', 'Subject', 'newsletter', 'v1', 'ready', $1) returning id",
+        _json.dumps({"headline": "Big News Headline", "sections": [
+            {"paragraphs": ["First paragraph of the campaign."]}]}))
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email, first_name) values ('c0', 'u@x.co', 'Ada')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c0')", cid)
+    await enqueue_campaign_sends(pool, cid)
+    sent = await process_send_queue(pool, make_settings(),
+                                    ResendClient("re", rps=10_000, backoff_base=0))
+    assert sent == 1
+    body = route.calls[0].request.read().decode()
+    assert "Big News Headline" in body and "First paragraph of the campaign." in body
+    assert "Ada" in body  # contact personalization still applied
+
+
+async def test_promote_scheduled_when_due(pool):
+    due = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status, scheduled_at) "
+        "values ('due', 's', 'newsletter', 'v1', 'scheduled', now() - interval '1 minute') returning id")
+    future = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status, scheduled_at) "
+        "values ('future', 's', 'newsletter', 'v1', 'scheduled', now() + interval '1 hour') returning id")
+    assert await promote_scheduled(pool) == 1
+    assert (await pool.fetchval("select status from campaigns where id=$1", due)) == "dispatching"
+    assert (await pool.fetchval("select status from campaigns where id=$1", future)) == "scheduled"
