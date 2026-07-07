@@ -45,7 +45,7 @@ async def send_seed(pool, settings: Settings, resend: ResendClient, campaign) ->
     content = json.loads(campaign["content"]) if "content" in campaign.keys() else {}
     for email in settings.seed_list:
         unsub = _unsub_url(settings, email, campaign["id"])
-        props = {**content, "firstName": "Seed", "unsubUrl": unsub}
+        props = build_props(content, campaign["template_ref"], "Seed", None, {}, unsub)
         rendered = (await render_batch(campaign["template_ref"], [props]))[0]
         await resend.send_email({
             "from": settings.from_email,
@@ -79,6 +79,28 @@ async def promote_scheduled(pool) -> int:
 def _unsub_url(settings: Settings, email: str, campaign_id) -> str:
     token = make_token(email, str(campaign_id), settings.unsub_signing_secret)
     return f"{settings.public_base_url}/u/{token}"
+
+
+def build_props(content: dict, template_ref: str, first_name: str | None,
+                last_name: str | None, custom_fields: dict, unsub_url: str) -> dict:
+    """Template props for one recipient. 'custom' templates carry bot-authored HTML
+    with {{firstName}}/{{lastName}} tokens; everything else gets content + contact
+    fields merged (contact wins)."""
+    if template_ref == "custom":
+        html_body = (content.get("html_body") or "")
+        html_body = html_body.replace("{{firstName}}", first_name or "there")
+        html_body = html_body.replace("{{lastName}}", last_name or "")
+        props = {"htmlBody": html_body, "unsubUrl": unsub_url}
+        if content.get("preheader"):
+            props["preheader"] = content["preheader"]
+        return props
+    return {
+        **content,
+        "firstName": first_name or None,
+        "lastName": last_name or None,
+        **custom_fields,
+        "unsubUrl": unsub_url,
+    }
 
 
 def build_headers(settings: Settings, unsub_url: str) -> dict:
@@ -158,13 +180,11 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
                 "select first_name, last_name, custom from contacts_cache "
                 "where ghl_contact_id=$1", send["ghl_contact_id"])
             custom = json.loads(contact["custom"]) if contact else {}
-            props_list.append({
-                **content,
-                "firstName": (contact["first_name"] if contact else "") or None,
-                "lastName": (contact["last_name"] if contact else "") or None,
-                **custom,
-                "unsubUrl": _unsub_url(settings, send["email"], campaign_id),
-            })
+            props_list.append(build_props(
+                content, campaign["template_ref"],
+                contact["first_name"] if contact else None,
+                contact["last_name"] if contact else None,
+                custom, _unsub_url(settings, send["email"], campaign_id)))
         try:
             rendered = await render_batch(campaign["template_ref"], props_list)
         except RenderError as exc:

@@ -142,3 +142,17 @@ async def test_process_bot_turns_drains_queue(pool):
     engine, slack = make_engine(pool, [[text_block("hi")]])
     assert await process_bot_turns(pool, engine) == 1
     assert (await pool.fetchval("select state from jobs")) == "completed"
+
+
+async def test_create_campaign_with_custom_template(pool):
+    engine, slack = make_engine(pool, [
+        [tool_block("create_campaign", {
+            "name": "Video promo", "subject": "Watch this", "tag": "test",
+            "template": "custom",
+            "content": {"preheader": "p", "html_body": "<table><tr><td>Hi {{firstName}}</td></tr></table>"}})],
+        [text_block("Created!")],
+    ])
+    await engine.handle_turn(TURN)
+    row = await pool.fetchrow("select template_ref, content from campaigns")
+    assert row["template_ref"] == "custom"
+    assert "html_body" in json.loads(row["content"])

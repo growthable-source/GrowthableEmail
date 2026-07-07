@@ -25,11 +25,23 @@ You help build and send email campaigns through the GHL->Resend pipeline.
 Workflow you must follow, in order:
 1. Understand what the user wants to send and to whom. Audiences are GHL tag filters —
    use list_ghl_tags to see what exists; confirm the tag with the user.
-2. Draft the campaign: a clear subject line and content for the newsletter template.
-   Content shape: {"preheader": str, "headline": str, "sections": [{"heading"?: str,
-   "paragraphs": [str, ...]}], "cta"?: {"label": str, "url": str}}.
+2. Draft the campaign: a clear subject line, then pick a template:
+   - template "newsletter" (structured, safe default for text-first updates).
+     Content shape: {"preheader": str, "headline": str, "sections": [{"heading"?: str,
+     "paragraphs": [str, ...]}], "cta"?: {"label": str, "url": str}}.
+   - template "custom" (bespoke design — use whenever the user wants something visual
+     or complains the standard look is plain). Content shape:
+     {"preheader": str, "html_body": "<table>...</table>"}.
+     html_body rules: email-client-safe HTML only — table-based layout, ALL styles
+     inline, no <style> blocks, no JS, no external CSS or fonts. Design for a 536px-wide
+     white card (the brand shell adds the outer container, header, unsubscribe link and
+     postal address — NEVER include your own unsubscribe or address). Images: absolute
+     https URLs with alt text, width set. Buttons: padded <a> with background-color and
+     border-radius. Use {{firstName}} where you want the recipient's first name.
+     Keep it renderable in Gmail/Outlook: no flexbox, no grid, no negative margins.
    Write tight, useful copy — no hype. Show the user your draft copy in chat before
-   creating the campaign, and iterate until they're happy.
+   creating the campaign, and iterate until they're happy. After a seed test, offer to
+   iterate on the design with update_campaign (which requires a fresh seed test).
 3. create_campaign, then sync_audience and report the audience size.
 4. send_seed_test and tell the user to check their inbox.
 5. Only after the user confirms the seed email looks good: propose_send. Ask when it
@@ -52,6 +64,8 @@ def _tool(name, description, properties, required):
 
 CONTENT_SCHEMA = {
     "type": "object",
+    "description": "For template 'newsletter': headline + sections (+ optional cta). "
+                   "For template 'custom': html_body (+ optional preheader).",
     "properties": {
         "preheader": {"type": "string"},
         "headline": {"type": "string"},
@@ -62,19 +76,25 @@ CONTENT_SCHEMA = {
         "cta": {"type": "object", "properties": {
             "label": {"type": "string"}, "url": {"type": "string"}},
             "required": ["label", "url"]},
+        "html_body": {"type": "string",
+                      "description": "custom template only: email-safe inline-styled HTML"},
     },
-    "required": ["headline", "sections"],
 }
+
+TEMPLATE_SCHEMA = {"type": "string", "enum": ["newsletter", "custom"],
+                   "description": "newsletter = structured blocks; custom = bespoke html_body"}
 
 TOOLS = [
     _tool("list_ghl_tags", "List available GHL contact tags for audience targeting.", {}, []),
-    _tool("create_campaign", "Create a campaign (template: newsletter).",
+    _tool("create_campaign", "Create a campaign.",
           {"name": {"type": "string"}, "subject": {"type": "string"},
            "tag": {"type": "string", "description": "GHL tag for the audience filter"},
+           "template": TEMPLATE_SCHEMA,
            "content": CONTENT_SCHEMA},
-          ["name", "subject", "tag", "content"]),
-    _tool("update_campaign", "Update a draft campaign's subject and/or content.",
+          ["name", "subject", "tag", "template", "content"]),
+    _tool("update_campaign", "Update a draft campaign's subject, template and/or content.",
           {"campaign_id": {"type": "string"}, "subject": {"type": "string"},
+           "template": TEMPLATE_SCHEMA,
            "content": CONTENT_SCHEMA},
           ["campaign_id"]),
     _tool("sync_audience", "Pull the campaign's audience from GHL (applies drop rules).",
@@ -180,11 +200,14 @@ class BotEngine:
             return {"tags": await self._ghl.list_tags()}
         if name == "create_campaign":
             audience_filter = [{"field": "tags", "operator": "eq", "value": args["tag"]}]
+            template = args.get("template", "newsletter")
+            if template not in ("newsletter", "custom"):
+                return {"error": f"unknown template {template!r}"}
             campaign_id = await pool.fetchval(
                 "insert into campaigns (name, subject, template_ref, template_version, "
-                "audience_filter, content) values ($1, $2, 'newsletter', 'v1', $3, $4) "
+                "audience_filter, content) values ($1, $2, $3, 'v1', $4, $5) "
                 "returning id",
-                args["name"], args["subject"], json.dumps(audience_filter),
+                args["name"], args["subject"], template, json.dumps(audience_filter),
                 json.dumps(args["content"]))
             await pool.execute(
                 "update bot_sessions set campaign_id=$1 where thread_ts=$2",
@@ -194,6 +217,12 @@ class BotEngine:
             if "subject" in args:
                 await pool.execute("update campaigns set subject=$2 where id=$1::uuid",
                                    args["campaign_id"], args["subject"])
+            if "template" in args:
+                if args["template"] not in ("newsletter", "custom"):
+                    return {"error": f"unknown template {args['template']!r}"}
+                await pool.execute(
+                    "update campaigns set template_ref=$2, seed_tested_at=null where id=$1::uuid",
+                    args["campaign_id"], args["template"])
             if "content" in args:
                 await pool.execute(
                     "update campaigns set content=$2, seed_tested_at=null where id=$1::uuid",
