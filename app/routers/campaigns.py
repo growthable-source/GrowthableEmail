@@ -1,7 +1,9 @@
 import json
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+import hmac
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.services.audience import sync_audience
@@ -10,7 +12,13 @@ from app.services.ghl import GHLClient
 from app.services.renderer import render_batch
 from app.services.resend_client import ResendClient
 
-router = APIRouter()
+async def require_api_key(request: Request, x_api_key: str | None = Header(default=None)):
+    expected = request.app.state.settings.api_key
+    if not x_api_key or not hmac.compare_digest(x_api_key, expected):
+        raise HTTPException(401, "invalid api key")
+
+
+router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
 class CampaignIn(BaseModel):

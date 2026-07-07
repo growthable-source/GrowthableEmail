@@ -28,6 +28,12 @@ async def test_healthz(client):
     assert resp.status_code == 200
 
 
+async def test_campaign_routes_require_api_key(client):
+    for headers in ({}, {"x-api-key": "wrong"}):
+        resp = await client.post("/campaigns", json={}, headers={"x-api-key": "", **headers})
+        assert resp.status_code == 401, headers
+
+
 @respx.mock
 async def test_test_send_goes_to_seed_list_only(client, pool):
     route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_t"}))

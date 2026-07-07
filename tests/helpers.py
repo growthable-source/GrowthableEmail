@@ -17,6 +17,7 @@ def make_settings(**overrides) -> Settings:
         ghl_location_id="loc_test",
         ghl_webhook_secret="hook-secret",
         unsub_signing_secret="unsub-secret",
+        api_key="test-api-key",
         public_base_url="http://testserver",
         from_email="Growthable <news@news.growthable.io>",
         send_rps=1000.0,

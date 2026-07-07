@@ -23,7 +23,7 @@ def test_env_vars_override(monkeypatch):
         "DATABASE_URL": "postgresql://env/db", "RESEND_API_KEY": "re_env",
         "RESEND_WEBHOOK_SECRET": "whsec_env", "GHL_PI_TOKEN": "pit-env",
         "GHL_LOCATION_ID": "loc-env", "GHL_WEBHOOK_SECRET": "hs",
-        "UNSUB_SIGNING_SECRET": "us", "PUBLIC_BASE_URL": "https://x",
+        "UNSUB_SIGNING_SECRET": "us", "API_KEY": "ak", "PUBLIC_BASE_URL": "https://x",
         "FROM_EMAIL": "a <a@b.co>", "DAILY_SEND_CAP": "2000",
     }.items():
         monkeypatch.setenv(key, val)

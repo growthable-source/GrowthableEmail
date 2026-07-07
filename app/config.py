@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     ghl_location_id: str
     ghl_webhook_secret: str
     unsub_signing_secret: str
+    api_key: str
     public_base_url: str
     from_email: str
     send_rps: float = 2.0

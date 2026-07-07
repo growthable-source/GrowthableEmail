@@ -42,5 +42,6 @@ async def client(pool):
     app.state.pool = pool
     app.state.settings = make_settings()
     transport = _httpx.ASGITransport(app=app)
-    async with _httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+    async with _httpx.AsyncClient(transport=transport, base_url="http://testserver",
+                                  headers={"x-api-key": "test-api-key"}) as c:
         yield c
