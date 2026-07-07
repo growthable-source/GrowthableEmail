@@ -44,6 +44,7 @@ async def test_test_send_goes_to_seed_list_only(client, pool):
     body = route.calls[0].request.read().decode()
     assert "[TEST]" in body and "seed@growthable.io" in body
     assert (await pool.fetchval("select count(*) from sends")) == 0  # no real sends recorded
+    assert (await pool.fetchval("select seed_tested_at from campaigns")) is not None
 
 
 @respx.mock

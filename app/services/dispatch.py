@@ -38,6 +38,28 @@ async def enqueue_campaign_sends(pool, campaign_id) -> int:
     return inserted
 
 
+async def send_seed(pool, settings: Settings, resend: ResendClient, campaign) -> list[str]:
+    """Render with the campaign's stored content and send to the seed list only."""
+    if not settings.seed_list:
+        raise ValueError("SEED_EMAILS is not configured")
+    content = json.loads(campaign["content"]) if "content" in campaign.keys() else {}
+    for email in settings.seed_list:
+        unsub = _unsub_url(settings, email, campaign["id"])
+        props = {**content, "firstName": "Seed", "unsubUrl": unsub}
+        rendered = (await render_batch(campaign["template_ref"], [props]))[0]
+        await resend.send_email({
+            "from": settings.from_email,
+            "to": [email],
+            "subject": f"[TEST] {campaign['subject']}",
+            "html": rendered.html,
+            "text": rendered.text,
+            "headers": build_headers(settings, unsub),
+        })
+    await pool.execute(
+        "update campaigns set seed_tested_at=now() where id=$1", campaign["id"])
+    return settings.seed_list
+
+
 async def requeue_stale(pool, stale_minutes: int = 10) -> int:
     """Return crashed 'sending' claims to the queue (worker restart recovery)."""
     result = await pool.execute(

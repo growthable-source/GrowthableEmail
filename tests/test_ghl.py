@@ -63,6 +63,13 @@ async def test_retries_on_429_then_succeeds():
 
 
 @respx.mock
+async def test_list_tags():
+    respx.get(f"{BASE}/locations/loc1/tags").mock(return_value=httpx.Response(200, json={
+        "tags": [{"id": "t1", "name": "newsletter"}, {"id": "t2", "name": "vip"}]}))
+    assert await make_client().list_tags() == ["newsletter", "vip"]
+
+
+@respx.mock
 async def test_hard_4xx_raises_immediately():
     route = respx.post(f"{BASE}/contacts/c1/tags").mock(return_value=httpx.Response(422, json={"msg": "bad"}))
     with pytest.raises(GHLError):

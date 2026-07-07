@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.services.audience import sync_audience
-from app.services.dispatch import _unsub_url, build_headers, enqueue_campaign_sends
+from app.services.dispatch import enqueue_campaign_sends, send_seed
 from app.services.ghl import GHLClient
-from app.services.renderer import render_batch
+from app.services.reports import campaign_report as campaign_report_data
 from app.services.resend_client import ResendClient
 
 async def require_api_key(request: Request, x_api_key: str | None = Header(default=None)):
@@ -64,23 +64,12 @@ async def sync_campaign_audience(request: Request, campaign_id: str):
 async def test_send(request: Request, campaign_id: str):
     campaign = await _get_campaign(request, campaign_id)
     settings = request.app.state.settings
-    if not settings.seed_list:
-        raise HTTPException(400, "SEED_EMAILS is not configured")
     resend = ResendClient(settings.resend_api_key, rps=settings.send_rps)
-    for email in settings.seed_list:
-        unsub = _unsub_url(settings, email, campaign["id"])
-        rendered = (await render_batch(campaign["template_ref"], [{
-            "firstName": "Seed", "unsubUrl": unsub,
-        }]))[0]
-        await resend.send_email({
-            "from": settings.from_email,
-            "to": [email],
-            "subject": f"[TEST] {campaign['subject']}",
-            "html": rendered.html,
-            "text": rendered.text,
-            "headers": build_headers(settings, unsub),
-        })
-    return {"sent_to": settings.seed_list}
+    try:
+        sent_to = await send_seed(request.app.state.pool, settings, resend, campaign)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"sent_to": sent_to}
 
 
 @router.post("/campaigns/{campaign_id}/dispatch")
@@ -95,21 +84,4 @@ async def dispatch_campaign(request: Request, campaign_id: str):
 @router.get("/campaigns/{campaign_id}/report")
 async def campaign_report(request: Request, campaign_id: str):
     campaign = await _get_campaign(request, campaign_id)
-    pool = request.app.state.pool
-    sends = await pool.fetchrow(
-        """select count(*) as total,
-                  count(*) filter (where status='sent') as sent,
-                  count(*) filter (where status='queued') as queued,
-                  count(*) filter (where status='failed') as failed,
-                  count(*) filter (where status='suppressed') as suppressed
-           from sends where campaign_id=$1""", campaign["id"])
-    events = await pool.fetch(
-        """select e.type, count(distinct e.send_id) as n
-           from events e join sends s on s.id = e.send_id
-           where s.campaign_id=$1 group by e.type""", campaign["id"])
-    return {
-        "campaign": {"id": str(campaign["id"]), "name": campaign["name"],
-                     "status": campaign["status"]},
-        "sends": dict(sends),
-        "events": {r["type"]: r["n"] for r in events},
-    }
+    return await campaign_report_data(request.app.state.pool, campaign["id"])

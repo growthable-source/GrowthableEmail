@@ -85,6 +85,10 @@ class GHLClient:
             if len(contacts) < page_limit or not search_after:
                 return
 
+    async def list_tags(self) -> list[str]:
+        data = await self._request("GET", f"/locations/{self.location_id}/tags")
+        return [t["name"] for t in data.get("tags") or []]
+
     async def add_tags(self, contact_id: str, tags: list[str]) -> None:
         await self._request("POST", f"/contacts/{contact_id}/tags", {"tags": tags})
 
