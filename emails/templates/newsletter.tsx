@@ -1,6 +1,6 @@
 import { Button, Heading, Text } from '@react-email/components';
 import * as React from 'react';
-import Layout from '../components/Layout.tsx';
+import Layout, { BRAND } from '../components/Layout.tsx';
 
 interface Section { heading?: string; paragraphs: string[]; }
 interface NewsletterProps {
@@ -12,21 +12,21 @@ interface NewsletterProps {
   unsubUrl: string;
 }
 
-const bodyStyle = { fontSize: '16px', color: '#18181b', lineHeight: '24px' };
+const bodyStyle = { fontSize: '16px', color: BRAND.navy, lineHeight: '25px' };
 
 export default function Newsletter({
   preheader, headline, sections = [], cta, firstName, unsubUrl,
 }: NewsletterProps) {
   return (
     <Layout preheader={preheader || headline} unsubUrl={unsubUrl}>
-      <Heading as="h1" style={{ fontSize: '24px', color: '#18181b', lineHeight: '32px' }}>
+      <Heading as="h1" style={{ fontSize: '26px', color: BRAND.navyDark, lineHeight: '34px', fontWeight: 700 }}>
         {headline}
       </Heading>
       {firstName ? <Text style={bodyStyle}>Hi {firstName},</Text> : null}
       {sections.map((section, i) => (
         <React.Fragment key={i}>
           {section.heading ? (
-            <Heading as="h2" style={{ fontSize: '18px', color: '#18181b', lineHeight: '26px' }}>
+            <Heading as="h2" style={{ fontSize: '18px', color: BRAND.navyDark, lineHeight: '26px' }}>
               {section.heading}
             </Heading>
           ) : null}
@@ -35,7 +35,7 @@ export default function Newsletter({
       ))}
       {cta ? (
         <Button href={cta.url}
-          style={{ backgroundColor: '#18181b', color: '#ffffff', padding: '12px 20px', borderRadius: '6px', fontSize: '14px' }}>
+          style={{ backgroundColor: BRAND.pink, color: '#ffffff', padding: '13px 28px', borderRadius: '999px', fontSize: '15px', fontWeight: 600 }}>
           {cta.label}
         </Button>
       ) : null}
