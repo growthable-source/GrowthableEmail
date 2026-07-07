@@ -3,9 +3,7 @@ import {
 } from '@react-email/components';
 import * as React from 'react';
 
-// TODO(ryan): replace with the real business mailing address before first send —
-// a physical address in the footer is a CAN-SPAM requirement (spec §4).
-export const BUSINESS_ADDRESS = 'PHYSICAL_ADDRESS — 123 Example St, Brisbane QLD 4000, Australia';
+export const BUSINESS_ADDRESS = '27 Red Ash Drive, Woonona NSW 2517, Australia';
 
 interface LayoutProps {
   preheader: string;
