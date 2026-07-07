@@ -1,10 +1,14 @@
+# Blueprint for the background worker only.
+# The web service (growthableemail.onrender.com) was created manually in the
+# dashboard and is not managed by this blueprint — recreating it here would
+# make Render spin up a duplicate.
 services:
-  - type: web
-    name: growthable-email-api
+  - type: worker
+    name: growthable-email-worker
     runtime: docker
     plan: starter
-    healthCheckPath: /healthz
-    envVars: &env
+    dockerCommand: python -m app.worker
+    envVars:
       - key: DATABASE_URL
         sync: false
       - key: RESEND_API_KEY
@@ -34,7 +38,7 @@ services:
       - key: ALERT_WEBHOOK_URL
         sync: false
       - key: SLACK_ENABLED
-        value: "false"
+        value: "true"
       - key: SLACK_BOT_TOKEN
         sync: false
       - key: SLACK_SIGNING_SECRET
@@ -43,9 +47,3 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-  - type: worker
-    name: growthable-email-worker
-    runtime: docker
-    plan: starter
-    dockerCommand: python -m app.worker
-    envVars: *env
