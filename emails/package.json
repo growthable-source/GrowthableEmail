@@ -1,0 +1,20 @@
+{
+  "name": "growthable-emails",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "email dev",
+    "test": "tsx --test tests/render.test.tsx"
+  },
+  "dependencies": {
+    "@react-email/components": "^0.0.31",
+    "@react-email/render": "^1.0.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "react-email": "^3.0.2",
+    "tsx": "^4.19.2"
+  }
+}
