@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from app.config import get_settings
 from app.db import create_pool
-from app.routers import campaigns, webhooks
+from app.routers import campaigns, unsub, webhooks
 
 
 def create_app() -> FastAPI:
@@ -21,6 +21,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="growthable-email", lifespan=lifespan)
     app.include_router(campaigns.router)
     app.include_router(webhooks.router)
+    app.include_router(unsub.router)
 
     @app.get("/healthz")
     async def healthz():
