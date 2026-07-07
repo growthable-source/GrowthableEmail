@@ -76,7 +76,8 @@ async def test_plain_reply_posts_to_thread_and_saves_session(pool):
 async def test_tool_call_creates_campaign_and_links_session(pool):
     engine, slack = make_engine(pool, [
         [tool_block("create_campaign", {"name": "July", "subject": "Big",
-                                        "tag": "newsletter", "content": CONTENT})],
+                                        "tag": "newsletter", "template": "newsletter",
+                                        "content": CONTENT})],
         [text_block("Created!")],
     ])
     await engine.handle_turn(TURN)
@@ -144,15 +145,32 @@ async def test_process_bot_turns_drains_queue(pool):
     assert (await pool.fetchval("select state from jobs")) == "completed"
 
 
+VALID_DOC = ("<!DOCTYPE html><html><body><h1>Hi {{first_name}}</h1>"
+             "<p>Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · "
+             '<a href="{{unsubscribe_url}}">Unsubscribe</a></p></body></html>')
+
+
 async def test_create_campaign_with_custom_template(pool):
     engine, slack = make_engine(pool, [
         [tool_block("create_campaign", {
             "name": "Video promo", "subject": "Watch this", "tag": "test",
-            "template": "custom",
-            "content": {"preheader": "p", "html_body": "<table><tr><td>Hi {{firstName}}</td></tr></table>"}})],
+            "template": "custom", "content": {"html_body": VALID_DOC}})],
         [text_block("Created!")],
     ])
     await engine.handle_turn(TURN)
     row = await pool.fetchrow("select template_ref, content from campaigns")
     assert row["template_ref"] == "custom"
     assert "html_body" in json.loads(row["content"])
+
+
+async def test_create_campaign_rejects_non_compliant_html(pool):
+    engine, slack = make_engine(pool, [
+        [tool_block("create_campaign", {
+            "name": "Bad", "subject": "s", "tag": "test", "template": "custom",
+            "content": {"html_body": "<html><body>no footer at all</body></html>"}})],
+        [text_block("Fixing.")],
+    ])
+    await engine.handle_turn(TURN)
+    assert (await pool.fetchval("select count(*) from campaigns")) == 0
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "unsubscribe_url" in result["error"]

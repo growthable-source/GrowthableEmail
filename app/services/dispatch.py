@@ -1,9 +1,12 @@
+import hashlib
+import html as html_lib
 import json
 import logging
+import re
 from collections import defaultdict
 
 from app.config import Settings
-from app.services.renderer import RenderError, render_batch
+from app.services.renderer import RenderError, Rendered, render_batch
 from app.services.resend_client import HardSendError, ResendClient, TransientSendError
 from app.services.suppressions import suppressed_subset
 from app.services.unsub_tokens import make_token
@@ -45,8 +48,11 @@ async def send_seed(pool, settings: Settings, resend: ResendClient, campaign) ->
     content = json.loads(campaign["content"]) if "content" in campaign.keys() else {}
     for email in settings.seed_list:
         unsub = _unsub_url(settings, email, campaign["id"])
-        props = build_props(content, campaign["template_ref"], "Seed", None, {}, unsub)
-        rendered = (await render_batch(campaign["template_ref"], [props]))[0]
+        if campaign["template_ref"] == "custom":
+            rendered = render_full_document(content, "Seed", None, unsub)
+        else:
+            props = build_props(content, "Seed", None, {}, unsub)
+            rendered = (await render_batch(campaign["template_ref"], [props]))[0]
         await resend.send_email({
             "from": settings.from_email,
             "to": [email],
@@ -81,19 +87,9 @@ def _unsub_url(settings: Settings, email: str, campaign_id) -> str:
     return f"{settings.public_base_url}/u/{token}"
 
 
-def build_props(content: dict, template_ref: str, first_name: str | None,
-                last_name: str | None, custom_fields: dict, unsub_url: str) -> dict:
-    """Template props for one recipient. 'custom' templates carry bot-authored HTML
-    with {{firstName}}/{{lastName}} tokens; everything else gets content + contact
-    fields merged (contact wins)."""
-    if template_ref == "custom":
-        html_body = (content.get("html_body") or "")
-        html_body = html_body.replace("{{firstName}}", first_name or "there")
-        html_body = html_body.replace("{{lastName}}", last_name or "")
-        props = {"htmlBody": html_body, "unsubUrl": unsub_url}
-        if content.get("preheader"):
-            props["preheader"] = content["preheader"]
-        return props
+def build_props(content: dict, first_name: str | None, last_name: str | None,
+                custom_fields: dict, unsub_url: str) -> dict:
+    """React-template props for one recipient: content + contact fields (contact wins)."""
     return {
         **content,
         "firstName": first_name or None,
@@ -101,6 +97,39 @@ def build_props(content: dict, template_ref: str, first_name: str | None,
         **custom_fields,
         "unsubUrl": unsub_url,
     }
+
+
+def personalize_full_html(html: str, first_name: str | None, last_name: str | None,
+                          unsub_url: str) -> str:
+    """Merge tokens into a bot-authored full HTML document ('custom' template)."""
+    return (html.replace("{{first_name}}", first_name or "there")
+                .replace("{{firstName}}", first_name or "there")
+                .replace("{{last_name}}", last_name or "")
+                .replace("{{lastName}}", last_name or "")
+                .replace("{{unsubscribe_url}}", unsub_url)
+                .replace("{{preferences_url}}", unsub_url))
+
+
+def html_to_text(html: str) -> str:
+    """Plain-text part for full-document emails (spec §4: always send a text part)."""
+    text = re.sub(r"<(head|style|script)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<br[^>]*>", "\n", text, flags=re.I)
+    text = re.sub(r"</(p|tr|td|h1|h2|h3|div)>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\s*\n\s*", "\n", text).strip()
+
+
+def render_full_document(content: dict, first_name: str | None, last_name: str | None,
+                         unsub_url: str) -> Rendered:
+    raw = content.get("html_body") or ""
+    if "{{unsubscribe_url}}" not in raw:
+        # compliance backstop (spec §12) — bot tools validate, this catches manual rows
+        raise RenderError("custom html_body missing {{unsubscribe_url}}")
+    html = personalize_full_html(raw, first_name, last_name, unsub_url)
+    return Rendered(html=html, text=html_to_text(html),
+                    hash=hashlib.sha256(html.encode()).hexdigest())
 
 
 def build_headers(settings: Settings, unsub_url: str) -> dict:
@@ -174,33 +203,47 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
         campaign = await pool.fetchrow(
             "select subject, template_ref, content from campaigns where id=$1", campaign_id)
         content = json.loads(campaign["content"])
-        props_list = []
+        contacts, unsub_urls = [], []
         for send in sends:
             contact = await pool.fetchrow(
                 "select first_name, last_name, custom from contacts_cache "
                 "where ghl_contact_id=$1", send["ghl_contact_id"])
-            custom = json.loads(contact["custom"]) if contact else {}
-            props_list.append(build_props(
-                content, campaign["template_ref"],
-                contact["first_name"] if contact else None,
-                contact["last_name"] if contact else None,
-                custom, _unsub_url(settings, send["email"], campaign_id)))
+            contacts.append(contact)
+            unsub_urls.append(_unsub_url(settings, send["email"], campaign_id))
         try:
-            rendered = await render_batch(campaign["template_ref"], props_list)
+            if campaign["template_ref"] == "custom":
+                rendered = [
+                    render_full_document(
+                        content,
+                        contact["first_name"] if contact else None,
+                        contact["last_name"] if contact else None,
+                        unsub)
+                    for contact, unsub in zip(contacts, unsub_urls)
+                ]
+            else:
+                props_list = [
+                    build_props(
+                        content,
+                        contact["first_name"] if contact else None,
+                        contact["last_name"] if contact else None,
+                        json.loads(contact["custom"]) if contact else {}, unsub)
+                    for contact, unsub in zip(contacts, unsub_urls)
+                ]
+                rendered = await render_batch(campaign["template_ref"], props_list)
         except RenderError as exc:
             log.error("render failed for campaign %s: %s", campaign_id, exc)
             for send in sends:
                 await _mark_transient_failure(pool, send["id"], send["retry_count"], str(exc))
             continue
 
-        for send, props, r in zip(sends, props_list, rendered):
+        for send, unsub, r in zip(sends, unsub_urls, rendered):
             payload = {
                 "from": settings.from_email,
                 "to": [send["email"]],
                 "subject": campaign["subject"],
                 "html": r.html,
                 "text": r.text,
-                "headers": build_headers(settings, props["unsubUrl"]),
+                "headers": build_headers(settings, unsub),
             }
             try:
                 email_id = await resend.send_email(payload)

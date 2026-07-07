@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -25,58 +26,25 @@ You help build and send email campaigns through the GHL->Resend pipeline.
 Workflow you must follow, in order:
 1. Understand what the user wants to send and to whom. Audiences are GHL tag filters —
    use list_ghl_tags to see what exists; confirm the tag with the user.
-2. Draft the campaign: a clear subject line, then pick a template:
-   - template "newsletter" (structured, safe default for text-first updates).
-     Content shape: {"preheader": str, "headline": str, "sections": [{"heading"?: str,
-     "paragraphs": [str, ...]}], "cta"?: {"label": str, "url": str}}.
-   - template "custom" (bespoke design — the default choice; use it whenever the email
-     benefits from visual structure). Content shape:
-     {"preheader": str, "html_body": "<table>...</table>"}.
-     html_body rules: email-client-safe HTML only — table-based layout, ALL styles
-     inline, no <style> blocks, no JS, no external CSS or fonts. Design for a 536px-wide
-     white card (the brand shell adds the outer container, logo header, unsubscribe link
-     and postal address — NEVER include your own unsubscribe or address). Images:
-     absolute https URLs with alt text, width set. Use {{firstName}} where you want the
-     recipient's first name. Keep it renderable in Gmail/Outlook: no flexbox, no grid,
-     no negative margins, no <video>.
-
-BRAND KIT (Growthable) — apply to every custom design:
-- Canvas is a white rounded card on cream; the shell provides it (including the navy
-  wordmark logo at the top — don't repeat it). Inside, build with generous whitespace
-  (24-32px vertical rhythm).
-- Colors (exact): navy #34475B (headings weight 700, body text) with #2A3A4C for extra
-  contrast; pink #F03E6A (accent, CTAs, links, small highlights); soft tints for
-  panels: #F6F7F9 (neutral), #FDEEF2 (pink), #EAF6EE (success green #2E7D46),
-  #FEF3E7 (warm orange note); borders #E8EAEE. Never set long body text in pink;
-  never put pink text on navy.
-- Brand assets (transparent PNGs, absolute URLs):
-  https://growthableemail.onrender.com/assets/growthable-logo-white.png — white
-  wordmark, ONLY on navy (#34475B) or pink (#F03E6A) panels, e.g. a dark hero band;
-  https://growthableemail.onrender.com/assets/growthable-icon.png — the "g" arrow
-  device, good small (40-64px) as a section accent or in a dark hero corner.
-  Never place the white logo on light backgrounds.
-- Type: system sans (Helvetica). h1 26px/34px 700; section text 15-16px/25px; small
-  meta 12-13px #7C8494.
-- Buttons are PILLS: <a href="…" style="display:inline-block;background-color:#EF4B6A;
-  color:#ffffff;padding:13px 28px;border-radius:999px;font-size:15px;font-weight:600;
-  text-decoration:none;">Label</a>. One primary CTA per email, centered or left.
-- Section labels (use to break up content, like a dashboard): small-caps line
-  '<span style="font-size:12px;letter-spacing:1px;color:#7C8494;font-weight:700;">
-  <span style="color:#EF4B6A;">●</span>&nbsp; SECTION NAME</span>' with 24px space above.
-- Stat/metric grids: a table row of 2-4 cells, each cell a rounded panel
-  (background:#F6F7F9;border:1px solid #E8EAEE;border-radius:12px;padding:16px) with a
-  12px grey uppercase label over a 28px navy bold number. 8px gutters via spacer cells.
-- Callout panels: full-width rounded box (border-radius:12px;padding:16px 20px) in a
-  tint color, optionally with a 3px left accent border, for the key takeaway/offer.
-- Checklist rows: table rows with a colored check '✓' in a tinted circle cell followed
-  by 15px navy text — good for feature/benefit lists.
-- Hero: either a headline block over a tinted panel, or a full-width image
-  (border-radius:12px). Keep heroes clean — headline + one supporting line.
-- VIDEO: email cannot embed players. Render a clickable thumbnail: for YouTube video
-  ID X use <a href="https://youtu.be/X"><img src="https://img.youtube.com/vi/X/
-  maxresdefault.jpg" width="536" alt="…" style="border-radius:12px;display:block;">
-  </a> and directly under it a centered pill CTA like "▶  Watch the video". Ask the
-  user for the video URL if they mention a video without one.
+2. Draft the campaign: a subject line and a COMPLETE HTML email document, authored
+   exactly per the EMAIL BRAND GUIDE appended below. Use template "custom" with
+   content {"html_body": "<!DOCTYPE html>...full document..."} — pick the closest of
+   the guide's four production templates and edit content only; structure, spacing
+   and colors stay. Additional hard rules on top of the guide:
+   - Personalization: {{first_name}} (fallback "there") is substituted per recipient.
+   - {{unsubscribe_url}} and {{preferences_url}} are substituted automatically per
+     recipient and MUST appear in the footer, along with the postal address line
+     'Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia'. Campaigns
+     missing either are rejected by the tools.
+   - Only reference images that actually exist: the three brand asset URLs in the
+     guide, YouTube thumbnails (https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg
+     linking to the video — email cannot embed players), or URLs the user gives you.
+     NEVER invent an image URL like the guide's example screenshot — ask the user or
+     design without it.
+   - Show the user your copy (subject, preheader, key lines) in chat before creating
+     the campaign; iterate until they're happy.
+   (template "newsletter" with structured props {"headline", "sections", "cta"} still
+   exists for bare-bones text updates, but "custom" per the guide is the default.)
    Write tight, useful copy — no hype. Show the user your draft copy in chat before
    creating the campaign, and iterate until they're happy. After a seed test, offer to
    iterate on the design with update_campaign (which requires a fresh seed test).
@@ -92,6 +60,24 @@ Rules:
   the current cap is in your context below.
 - Keep Slack replies short and skimmable. Use plain language.
 - If a tool returns an error, explain it briefly and suggest the fix."""
+
+
+BRAND_GUIDE = (Path(__file__).parent / "brand_guide.md").read_text()
+
+REQUIRED_ADDRESS_MARKER = "Woonona"
+
+
+def validate_custom_html(content: dict) -> str | None:
+    """Compliance gate for bot-authored full-document emails (spec §12)."""
+    html = (content or {}).get("html_body") or ""
+    if not html.strip():
+        return "custom template requires content.html_body (a complete HTML document)"
+    if "{{unsubscribe_url}}" not in html:
+        return "html_body must include {{unsubscribe_url}} in the footer"
+    if REQUIRED_ADDRESS_MARKER not in html:
+        return ("footer must include the postal address line: "
+                "Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia")
+    return None
 
 
 def _tool(name, description, properties, required):
@@ -178,7 +164,8 @@ class BotEngine:
         now = datetime.now(ZoneInfo(self._settings.bot_timezone))
         return (f"{SYSTEM_PROMPT}\n\nCurrent time: {now.isoformat()} "
                 f"({self._settings.bot_timezone}). Daily send cap: "
-                f"{self._settings.daily_send_cap}.")
+                f"{self._settings.daily_send_cap}.\n\n"
+                f"=== EMAIL BRAND GUIDE ===\n\n{BRAND_GUIDE}")
 
     async def handle_turn(self, data: dict) -> None:
         channel, thread_ts = data["channel"], data["thread_ts"]
@@ -238,9 +225,13 @@ class BotEngine:
             return {"tags": await self._ghl.list_tags()}
         if name == "create_campaign":
             audience_filter = [{"field": "tags", "operator": "eq", "value": args["tag"]}]
-            template = args.get("template", "newsletter")
+            template = args.get("template", "custom")
             if template not in ("newsletter", "custom"):
                 return {"error": f"unknown template {template!r}"}
+            if template == "custom":
+                error = validate_custom_html(args.get("content"))
+                if error:
+                    return {"error": error}
             campaign_id = await pool.fetchval(
                 "insert into campaigns (name, subject, template_ref, template_version, "
                 "audience_filter, content) values ($1, $2, $3, 'v1', $4, $5) "
@@ -252,6 +243,10 @@ class BotEngine:
                 campaign_id, self._turn_context["thread_ts"])
             return {"campaign_id": str(campaign_id), "status": "draft"}
         if name == "update_campaign":
+            if "content" in args and "html_body" in args["content"]:
+                error = validate_custom_html(args["content"])
+                if error:
+                    return {"error": error}
             if "subject" in args:
                 await pool.execute("update campaigns set subject=$2 where id=$1::uuid",
                                    args["campaign_id"], args["subject"])

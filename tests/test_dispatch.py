@@ -138,14 +138,18 @@ async def test_promote_scheduled_when_due(pool):
     assert (await pool.fetchval("select status from campaigns where id=$1", future)) == "scheduled"
 
 
+FULL_DOC = ("<!DOCTYPE html><html><body><h1>Bespoke {{first_name}}!</h1>"
+            "<p>Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · "
+            '<a href="{{unsubscribe_url}}">Unsubscribe</a></p></body></html>')
+
+
 @respx.mock
-async def test_custom_template_personalizes_html_body(pool):
+async def test_custom_full_document_personalized_and_unsub_substituted(pool):
     route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_1"}))
     cid = await pool.fetchval(
         "insert into campaigns (name, subject, template_ref, template_version, status, content) "
         "values ('custom camp', 'Subject', 'custom', 'v1', 'ready', $1) returning id",
-        _json.dumps({"preheader": "peek",
-                     "html_body": "<table><tr><td><h1>Bespoke {{firstName}}!</h1></td></tr></table>"}))
+        _json.dumps({"html_body": FULL_DOC}))
     await pool.execute(
         "insert into contacts_cache (ghl_contact_id, email, first_name) values ('c0', 'u@x.co', 'Ada')")
     await pool.execute(
@@ -154,7 +158,26 @@ async def test_custom_template_personalizes_html_body(pool):
     sent = await process_send_queue(pool, make_settings(),
                                     ResendClient("re", rps=10_000, backoff_base=0))
     assert sent == 1
-    body = route.calls[0].request.read().decode()
-    assert "Bespoke Ada!" in body          # token substituted
-    assert "{{firstName}}" not in body
-    assert "/u/" in body                   # unsub still injected by the shell
+    body = _json.loads(route.calls[0].request.read())
+    assert "Bespoke Ada!" in body["html"]
+    assert "{{first_name}}" not in body["html"] and "{{unsubscribe_url}}" not in body["html"]
+    assert "http://testserver/u/" in body["html"]      # real signed unsub link merged in
+    assert "Bespoke Ada!" in body["text"]              # plain-text part generated
+    assert "List-Unsubscribe" in str(body["headers"])  # headers still applied
+
+
+@respx.mock
+async def test_custom_missing_unsub_token_never_sends(pool):
+    route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_1"}))
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status, content) "
+        "values ('bad camp', 'Subject', 'custom', 'v1', 'ready', $1) returning id",
+        _json.dumps({"html_body": "<html><body>no unsub here</body></html>"}))
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('c0', 'u@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c0')", cid)
+    await enqueue_campaign_sends(pool, cid)
+    sent = await process_send_queue(pool, make_settings(),
+                                    ResendClient("re", rps=10_000, backoff_base=0))
+    assert sent == 0 and not route.called  # compliance backstop: nothing goes out
