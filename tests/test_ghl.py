@@ -75,3 +75,24 @@ async def test_hard_4xx_raises_immediately():
     with pytest.raises(GHLError):
         await make_client().add_tags("c1", ["x"])
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_search_conversations_paginates_and_stops_at_cutoff():
+    page1 = {"conversations": [
+        {"contactId": "c1", "lastMessageDate": 5000, "lastMessageDirection": "inbound",
+         "lastMessageType": "TYPE_EMAIL"},
+        {"contactId": "c2", "lastMessageDate": 4000},
+    ], "total": 4}
+    page2 = {"conversations": [
+        {"contactId": "c3", "lastMessageDate": 3000},
+        {"contactId": "c4", "lastMessageDate": 1000},  # older than cutoff → stop
+    ], "total": 4}
+    route = respx.get(f"{BASE}/conversations/search").mock(side_effect=[
+        httpx.Response(200, json=page1), httpx.Response(200, json=page2)])
+    client = make_client()
+    got = [c async for c in client.search_conversations(last_message_after_ms=2000, page_limit=2)]
+    assert [c["contact_id"] for c in got] == ["c1", "c2", "c3"]
+    assert got[0]["last_message_direction"] == "inbound"
+    # second request carried the pagination cursor
+    assert "startAfterDate=4000" in str(route.calls[1].request.url)

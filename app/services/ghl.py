@@ -45,14 +45,15 @@ class GHLClient:
             "Accept": "application/json",
         }
 
-    async def _request(self, method: str, path: str, json_body: dict | None = None) -> dict:
+    async def _request(self, method: str, path: str, json_body: dict | None = None,
+                       params: dict | None = None) -> dict:
         last_error: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             await self._limiter.wait()
             try:
                 async with httpx.AsyncClient(base_url=BASE_URL, headers=self._headers,
                                              timeout=30) as client:
-                    resp = await client.request(method, path, json=json_body)
+                    resp = await client.request(method, path, json=json_body, params=params)
             except httpx.HTTPError as exc:
                 last_error = exc
                 await asyncio.sleep(self._backoff_base * 2 ** attempt)
@@ -83,6 +84,33 @@ class GHLClient:
                 yield _parse_contact(raw)
             search_after = _parse_contact(contacts[-1])["search_after"]
             if len(contacts) < page_limit or not search_after:
+                return
+
+    async def search_conversations(self, last_message_after_ms: int,
+                                   page_limit: int = 50) -> AsyncIterator[dict]:
+        """Conversations newest-first, stopping once older than the cutoff (epoch ms)."""
+        start_after = None
+        while True:
+            params: dict = {"locationId": self.location_id, "limit": page_limit,
+                            "sortBy": "last_message_date", "sort": "desc"}
+            if start_after is not None:
+                params["startAfterDate"] = start_after
+            data = await self._request("GET", "/conversations/search", params=params)
+            conversations = data.get("conversations") or []
+            if not conversations:
+                return
+            for raw in conversations:
+                last_message = raw.get("lastMessageDate") or 0
+                if last_message < last_message_after_ms:
+                    return
+                yield {
+                    "contact_id": raw.get("contactId"),
+                    "last_message_date": last_message,
+                    "last_message_direction": raw.get("lastMessageDirection"),
+                    "last_message_type": raw.get("lastMessageType"),
+                }
+            start_after = conversations[-1].get("lastMessageDate")
+            if len(conversations) < page_limit or not start_after:
                 return
 
     async def list_tags(self) -> list[str]:

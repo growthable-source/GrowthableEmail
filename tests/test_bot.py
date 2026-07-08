@@ -174,3 +174,38 @@ async def test_create_campaign_rejects_non_compliant_html(pool):
     assert (await pool.fetchval("select count(*) from campaigns")) == 0
     result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
     assert "unsubscribe_url" in result["error"]
+
+
+async def test_build_engaged_segment_tags_unique_contacts(pool):
+    class ConvoGHL(FakeGHL):
+        async def search_conversations(self, last_message_after_ms, page_limit=50):
+            for cv in [{"contact_id": "c1", "last_message_date": 99},
+                       {"contact_id": "c2", "last_message_date": 98},
+                       {"contact_id": "c1", "last_message_date": 97},  # duplicate contact
+                       {"contact_id": None, "last_message_date": 96}]:  # no contact id
+                yield cv
+
+    slack = FakeSlack()
+    engine = BotEngine(pool=pool, settings=make_settings(), ghl=ConvoGHL(), slack=slack,
+                       resend=None, client=FakeAnthropic([
+                           [tool_block("build_engaged_segment", {"days": 90, "tag": "engaged-90d"})],
+                           [text_block("Segment building.")],
+                       ]))
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert result["contacts_found"] == 2 and result["tag"] == "engaged-90d"
+    jobs = [json.loads(r["data"]) for r in await pool.fetch(
+        "select data from jobs where name='ghl_writeback'")]
+    assert sorted(j["contact_id"] for j in jobs) == ["c1", "c2"]
+    assert all(j["tags"] == ["engaged-90d"] for j in jobs)
+
+
+async def test_segment_progress_reports_job_states(pool):
+    await enqueue(pool, "ghl_writeback", {"kind": "add_tags", "contact_id": "c1", "tags": ["x"]})
+    engine, slack = make_engine(pool, [
+        [tool_block("segment_progress", {})],
+        [text_block("1 pending.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert result == {"created": 1}

@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -9,7 +9,7 @@ import anthropic
 from app.config import Settings
 from app.services.audience import sync_audience
 from app.services.dispatch import send_seed
-from app.services.jobs import complete_job, fail_job, fetch_job
+from app.services.jobs import complete_job, enqueue, fail_job, fetch_job
 from app.services.reports import campaign_report
 from app.services.resend_client import ResendClient
 
@@ -26,6 +26,10 @@ You help build and send email campaigns through the GHL->Resend pipeline.
 Workflow you must follow, in order:
 1. Understand what the user wants to send and to whom. Audiences are GHL tag filters —
    use list_ghl_tags to see what exists; confirm the tag with the user.
+   For HIGH-INTENT audiences, offer build_engaged_segment: it finds every contact with
+   GHL conversation activity in the last N days and tags them (e.g. 'engaged-90d'),
+   which then becomes the campaign's audience tag. Tagging runs in the background —
+   check segment_progress before syncing the audience.
 2. Draft the campaign: a subject line and a COMPLETE HTML email document, authored
    exactly per the EMAIL BRAND GUIDE appended below. Use template "custom" with
    content {"html_body": "<!DOCTYPE html>...full document..."} — pick the closest of
@@ -127,6 +131,15 @@ TOOLS = [
           {"campaign_id": {"type": "string"}}, ["campaign_id"]),
     _tool("get_report", "Send/delivery/open/click/bounce rollup for a campaign.",
           {"campaign_id": {"type": "string"}}, ["campaign_id"]),
+    _tool("build_engaged_segment",
+          "Tag every contact with GHL conversation activity in the last N days "
+          "(high-intent segment). Tagging runs via background jobs; use "
+          "segment_progress to check completion before sync_audience.",
+          {"days": {"type": "integer", "minimum": 1, "maximum": 365},
+           "tag": {"type": "string", "description": "tag to apply, e.g. engaged-90d"}},
+          ["days", "tag"]),
+    _tool("segment_progress",
+          "Counts of pending/completed background tagging jobs.", {}, []),
     _tool("propose_send",
           "Post the approval buttons for dispatch. Requires a prior successful seed test. "
           "when_iso: ISO-8601 datetime with timezone offset, omit to send immediately.",
@@ -273,6 +286,34 @@ class BotEngine:
         if name == "get_report":
             import uuid as _uuid
             return await campaign_report(pool, _uuid.UUID(args["campaign_id"]))
+        if name == "build_engaged_segment":
+            days, tag = int(args["days"]), args["tag"].strip()
+            if not 1 <= days <= 365:
+                return {"error": "days must be between 1 and 365"}
+            if not tag:
+                return {"error": "tag must not be empty"}
+            cutoff_ms = int((datetime.now(timezone.utc).timestamp() - days * 86400) * 1000)
+            seen: set[str] = set()
+            capped = False
+            async for convo in self._ghl.search_conversations(cutoff_ms):
+                contact_id = convo.get("contact_id")
+                if contact_id:
+                    seen.add(contact_id)
+                if len(seen) >= 10_000:
+                    capped = True
+                    break
+            for contact_id in seen:
+                await enqueue(pool, "ghl_writeback",
+                              {"kind": "add_tags", "contact_id": contact_id, "tags": [tag]})
+            minutes = max(1, len(seen) // 480)
+            return {"contacts_found": len(seen), "tag": tag, "capped_at_10k": capped,
+                    "note": f"tagging in background (~{minutes} min); check "
+                            "segment_progress, then use this tag as the audience"}
+        if name == "segment_progress":
+            rows = await pool.fetch(
+                "select state, count(*) as n from jobs where name='ghl_writeback' "
+                "group by state")
+            return {r["state"]: r["n"] for r in rows} or {"idle": True}
         if name == "propose_send":
             campaign = await pool.fetchrow(
                 "select * from campaigns where id=$1::uuid", args["campaign_id"])
