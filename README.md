@@ -85,6 +85,25 @@ Usage: tag @email-bot in the channel and describe the campaign. It will confirm 
 audience tag, draft copy, seed-test to SEED_EMAILS, and post Send/Cancel buttons.
 The seed test is mandatory; the daily cap and kill rules still apply.
 
+### Social media bot
+Same Slack app, second channel. The bot drafts posts (brand voice §1-3 of the email
+guide), generates images (Gemini), and publishes/schedules via GHL Social Planner
+after a Publish button click.
+
+Setup:
+1. Add **View/Edit Social Planner** scopes to the GHL PIT.
+2. Create a private channel (e.g. #social-posts), `/invite @email-bot`, copy its
+   channel ID → `SLACK_SOCIAL_CHANNEL_ID` on both Render services.
+3. Get a Gemini API key (aistudio.google.com) → `GEMINI_API_KEY` on both services.
+4. Apply `supabase/migrations/0003_social.sql`.
+5. Connect social accounts in GHL → Marketing → Social Planner (the bot posts to
+   whatever is connected).
+
+Usage: tag the bot in the social channel ("draft a LinkedIn post about X with an
+image"). It confirms target accounts, drafts, shows the image, and posts
+Publish/Cancel buttons. Scheduled posts land in GHL Social Planner where they can
+also be edited or deleted.
+
 ### Go-live checklist (spec §11.9)
 - [ ] Seed test: `POST /campaigns/{id}/test` → inspect in Gmail: DKIM=news subdomain pass,
       List-Unsubscribe header present, one-click unsub works, plain-text part present,

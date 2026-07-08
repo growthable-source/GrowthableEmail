@@ -27,7 +27,9 @@ def make_settings(**overrides) -> Settings:
         slack_bot_token="xoxb-test",
         slack_signing_secret="slack-signing-secret",
         slack_channel_id="C0TEST",
+        slack_social_channel_id="C0SOCIAL",
         anthropic_api_key="sk-ant-test",
+        gemini_api_key="gm-test",
     )
     defaults.update(overrides)
     return Settings(**defaults)

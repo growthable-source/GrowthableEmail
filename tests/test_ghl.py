@@ -96,3 +96,32 @@ async def test_search_conversations_paginates_and_stops_at_cutoff():
     assert got[0]["last_message_direction"] == "inbound"
     # second request carried the pagination cursor
     assert "startAfterDate=4000" in str(route.calls[1].request.url)
+
+
+@respx.mock
+async def test_list_social_accounts():
+    respx.get(f"{BASE}/social-media-posting/loc1/accounts").mock(
+        return_value=httpx.Response(200, json={"results": {"accounts": [
+            {"id": "acc1", "platform": "linkedin", "name": "Growthable"},
+        ]}}))
+    accounts = await make_client().list_social_accounts()
+    assert accounts == [{"id": "acc1", "platform": "linkedin", "name": "Growthable"}]
+
+
+@respx.mock
+async def test_create_social_post_scheduled_and_now():
+    import json as _j
+    route = respx.post(f"{BASE}/social-media-posting/loc1/posts").mock(
+        return_value=httpx.Response(200, json={"results": {"post": {"_id": "p1"}}}))
+    client = make_client()
+    post_id = await client.create_social_post(
+        ["acc1"], "Hello world", ["https://x/img.png"],
+        schedule_at_iso="2030-01-01T00:00:00+00:00")
+    assert post_id == "p1"
+    body = _j.loads(route.calls[0].request.read())
+    assert body["accountIds"] == ["acc1"] and body["summary"] == "Hello world"
+    assert body["media"] == [{"url": "https://x/img.png"}]
+    assert body["status"] == "scheduled" and body["scheduleDate"] == "2030-01-01T00:00:00+00:00"
+    await client.create_social_post(["acc1"], "Now post")
+    body = _j.loads(route.calls[1].request.read())
+    assert body["status"] == "published" and "scheduleDate" not in body and "media" not in body

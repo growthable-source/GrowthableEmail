@@ -26,7 +26,7 @@ async def pool():
 async def _clean_tables(pool):
     await pool.execute(
         "truncate campaigns, contacts_cache, campaign_contacts, sends, events, "
-        "suppressions, jobs, bot_sessions, slack_events cascade"
+        "suppressions, jobs, bot_sessions, slack_events, social_posts, images cascade"
     )
     yield
 

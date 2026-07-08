@@ -113,6 +113,32 @@ class GHLClient:
             if len(conversations) < page_limit or not start_after:
                 return
 
+    async def list_social_accounts(self) -> list[dict]:
+        data = await self._request(
+            "GET", f"/social-media-posting/{self.location_id}/accounts")
+        results = data.get("results") or data
+        accounts = results.get("accounts") or []
+        return [{"id": a.get("id") or a.get("_id"),
+                 "platform": a.get("platform") or a.get("type"),
+                 "name": a.get("name")} for a in accounts]
+
+    async def create_social_post(self, account_ids: list[str], summary: str,
+                                 media_urls: list[str] | None = None,
+                                 schedule_at_iso: str | None = None) -> str | None:
+        body: dict = {"accountIds": list(account_ids), "summary": summary,
+                      "type": "post"}
+        if media_urls:
+            body["media"] = [{"url": url} for url in media_urls]
+        if schedule_at_iso:
+            body["status"] = "scheduled"
+            body["scheduleDate"] = schedule_at_iso
+        else:
+            body["status"] = "published"
+        data = await self._request(
+            "POST", f"/social-media-posting/{self.location_id}/posts", body)
+        post = (data.get("results") or {}).get("post") or data.get("post") or {}
+        return post.get("_id") or post.get("id")
+
     async def list_tags(self) -> list[str]:
         data = await self._request("GET", f"/locations/{self.location_id}/tags")
         return [t["name"] for t in data.get("tags") or []]

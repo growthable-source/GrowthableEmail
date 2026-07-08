@@ -141,7 +141,7 @@ async def test_claude_error_posts_apology_and_completes_job(pool):
 async def test_process_bot_turns_drains_queue(pool):
     await enqueue(pool, "bot_turn", TURN)
     engine, slack = make_engine(pool, [[text_block("hi")]])
-    assert await process_bot_turns(pool, engine) == 1
+    assert await process_bot_turns(pool, {"C0TEST": engine}) == 1
     assert (await pool.fetchval("select state from jobs")) == "completed"
 
 

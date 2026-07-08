@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     slack_signing_secret: str = ""
     slack_channel_id: str = ""
+    slack_social_channel_id: str = ""
     anthropic_api_key: str = ""
+    gemini_api_key: str = ""
     bot_timezone: str = "Australia/Sydney"
 
     @property

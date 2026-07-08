@@ -13,6 +13,12 @@ async def test_bot_tables_exist(pool):
     assert {"bot_sessions", "slack_events"} <= {r["table_name"] for r in rows}
 
 
+async def test_social_tables_exist(pool):
+    rows = await pool.fetch(
+        "select table_name from information_schema.tables where table_schema='public'")
+    assert {"social_posts", "images"} <= {r["table_name"] for r in rows}
+
+
 async def test_campaigns_have_content_and_seed_tested(pool):
     cols = {r["column_name"] for r in await pool.fetch(
         "select column_name from information_schema.columns where table_name='campaigns'")}

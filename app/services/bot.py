@@ -2,23 +2,16 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
-import anthropic
 
 from app.config import Settings
 from app.services.audience import sync_audience
+from app.services.bot_base import BaseBot, process_bot_turns  # noqa: F401 (re-export)
 from app.services.dispatch import send_seed
-from app.services.jobs import complete_job, enqueue, fail_job, fetch_job
+from app.services.jobs import enqueue
 from app.services.reports import campaign_report
 from app.services.resend_client import ResendClient
 
 log = logging.getLogger(__name__)
-
-MODEL = "claude-opus-4-8"
-MAX_LOOPS = 8
-HISTORY_LIMIT = 40
-MAX_JOBS_PER_PASS = 10
 
 SYSTEM_PROMPT = """You are Growthable's email campaign assistant, working inside Slack.
 You help build and send email campaigns through the GHL->Resend pipeline.
@@ -164,73 +157,19 @@ def approval_blocks(campaign_id: str, name: str, subject: str, audience: int,
     ]
 
 
-class BotEngine:
+class BotEngine(BaseBot):
+    """Email campaign persona."""
+
+    system_prompt = SYSTEM_PROMPT
+    tools = TOOLS
+
     def __init__(self, pool, settings: Settings, ghl, slack, resend, client=None):
-        self._pool = pool
-        self._settings = settings
-        self._ghl = ghl
-        self._slack = slack
+        super().__init__(pool, settings, ghl, slack, client=client)
         self._resend = resend or ResendClient(settings.resend_api_key, rps=settings.send_rps)
-        self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     def _system(self) -> str:
-        now = datetime.now(ZoneInfo(self._settings.bot_timezone))
-        return (f"{SYSTEM_PROMPT}\n\nCurrent time: {now.isoformat()} "
-                f"({self._settings.bot_timezone}). Daily send cap: "
-                f"{self._settings.daily_send_cap}.\n\n"
-                f"=== EMAIL BRAND GUIDE ===\n\n{BRAND_GUIDE}")
-
-    async def handle_turn(self, data: dict) -> None:
-        channel, thread_ts = data["channel"], data["thread_ts"]
-        row = await self._pool.fetchrow(
-            "select messages from bot_sessions where thread_ts=$1", thread_ts)
-        messages = json.loads(row["messages"]) if row else []
-        messages.append({"role": "user", "content": f"<@{data['user']}>: {data['text']}"})
-        self._turn_context = {"channel": channel, "thread_ts": thread_ts}
-
-        # session row must exist before tools (create_campaign links to it)
-        await self._pool.execute(
-            "insert into bot_sessions (thread_ts, channel) values ($1, $2) "
-            "on conflict (thread_ts) do nothing", thread_ts, channel)
-
-        try:
-            for _ in range(MAX_LOOPS):
-                response = await self._client.messages.create(
-                    model=MODEL, max_tokens=16000,
-                    thinking={"type": "adaptive"},
-                    system=self._system(), tools=TOOLS, messages=messages)
-                messages.append({"role": "assistant",
-                                 "content": [b.model_dump(mode="json")
-                                             for b in response.content]})
-                tool_uses = [b for b in response.content if b.type == "tool_use"]
-                if not tool_uses:
-                    reply = "".join(b.text for b in response.content if b.type == "text")
-                    await self._slack.post_message(channel, text=reply or "(no reply)",
-                                                   thread_ts=thread_ts)
-                    break
-                results = []
-                for tu in tool_uses:
-                    try:
-                        out = await self._run_tool(tu.name, tu.input)
-                        is_error = isinstance(out, dict) and "error" in out
-                    except Exception as exc:
-                        log.exception("bot tool %s failed", tu.name)
-                        out, is_error = {"error": str(exc)[:500]}, True
-                    results.append({"type": "tool_result", "tool_use_id": tu.id,
-                                    "content": json.dumps(out), "is_error": is_error})
-                messages.append({"role": "user", "content": results})
-        except Exception as exc:
-            log.exception("bot turn failed for thread %s", thread_ts)
-            await self._slack.post_message(
-                channel, text=f"⚠️ Something went wrong on my end: {str(exc)[:300]}. "
-                              "Tag me again to retry.", thread_ts=thread_ts)
-
-        await self._pool.execute(
-            """insert into bot_sessions (thread_ts, channel, messages, updated_at)
-               values ($1, $2, $3, now())
-               on conflict (thread_ts) do update set
-                   messages=excluded.messages, updated_at=now()""",
-            thread_ts, channel, json.dumps(messages[-HISTORY_LIMIT:]))
+        return (f"{super()._system()} Daily send cap: {self._settings.daily_send_cap}."
+                f"\n\n=== EMAIL BRAND GUIDE ===\n\n{BRAND_GUIDE}")
 
     async def _run_tool(self, name: str, args: dict):
         pool = self._pool
@@ -331,20 +270,3 @@ class BotEngine:
                 blocks=blocks, thread_ts=self._turn_context["thread_ts"])
             return {"posted": True, "note": "approval buttons posted; a human must click Send"}
         raise ValueError(f"unknown tool: {name}")
-
-
-async def process_bot_turns(pool, engine: BotEngine, max_jobs: int = MAX_JOBS_PER_PASS) -> int:
-    done = 0
-    for _ in range(max_jobs):
-        job = await fetch_job(pool, "bot_turn")
-        if job is None:
-            break
-        try:
-            await engine.handle_turn(job["data"])
-        except Exception:
-            log.exception("bot_turn job %s failed", job["id"])
-            await fail_job(pool, job["id"])
-            continue
-        await complete_job(pool, job["id"])
-        done += 1
-    return done

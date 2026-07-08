@@ -7,6 +7,7 @@ from urllib.parse import parse_qs
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.services.dispatch import enqueue_campaign_sends
+from app.services.ghl import GHLClient
 from app.services.jobs import enqueue
 from app.services.slack_client import SlackClient, verify_slack_signature
 
@@ -46,7 +47,9 @@ async def slack_events(request: Request):
         return {"ok": True}
     if event.get("bot_id") or event.get("subtype"):
         return {"ok": True}
-    if event.get("channel") != settings.slack_channel_id:
+    configured_channels = {c for c in (settings.slack_channel_id,
+                                       settings.slack_social_channel_id) if c}
+    if event.get("channel") not in configured_channels:
         return {"ok": True}
 
     etype = event.get("type")
@@ -86,7 +89,6 @@ async def slack_interactions(request: Request):
         return Response(status_code=200)
     action = payload["actions"][0]
     value = json.loads(action["value"])
-    campaign_id = uuid.UUID(value["campaign_id"])
     channel = payload["channel"]["id"]
     message_ts = payload["container"]["message_ts"]
     user = payload["user"]["id"]
@@ -94,6 +96,12 @@ async def slack_interactions(request: Request):
     pool = request.app.state.pool
     settings = request.app.state.settings
     slack = SlackClient(settings.slack_bot_token)
+
+    if action["action_id"] in ("approve_post", "cancel_post"):
+        return await _handle_post_action(pool, settings, slack, action, value,
+                                         channel, message_ts, user)
+
+    campaign_id = uuid.UUID(value["campaign_id"])
     campaign = await pool.fetchrow("select status from campaigns where id=$1", campaign_id)
     if campaign is None:
         await slack.update_message(channel, message_ts, text="Campaign no longer exists.")
@@ -122,4 +130,50 @@ async def slack_interactions(request: Request):
         await slack.update_message(
             channel, message_ts,
             text=f"✅ Approved by <@{user}> — {queued} contacts queued, {scheduled_note}.")
+    return Response(status_code=200)
+
+
+async def _handle_post_action(pool, settings, slack, action, value, channel,
+                              message_ts, user) -> Response:
+    post_id = uuid.UUID(value["post_id"])
+    post = await pool.fetchrow("select * from social_posts where id=$1", post_id)
+    if post is None:
+        await slack.update_message(channel, message_ts, text="Post no longer exists.")
+        return Response(status_code=200)
+    if post["status"] != "draft":
+        await slack.update_message(
+            channel, message_ts, text=f"Already handled (status: {post['status']}).")
+        return Response(status_code=200)
+
+    if action["action_id"] == "cancel_post":
+        await pool.execute(
+            "update social_posts set status='cancelled' where id=$1", post_id)
+        await slack.update_message(channel, message_ts, text=f"❌ Cancelled by <@{user}>.")
+        return Response(status_code=200)
+
+    content = json.loads(post["content"])
+    when = value.get("when")
+    schedule_iso = None
+    if when:
+        when_dt = datetime.fromisoformat(when)
+        if when_dt > datetime.now(timezone.utc):
+            schedule_iso = when_dt.astimezone(timezone.utc).isoformat()
+    ghl = GHLClient(settings.ghl_pi_token, settings.ghl_location_id)
+    try:
+        ghl_post_id = await ghl.create_social_post(
+            post["account_ids"], content["text"], content.get("media") or [],
+            schedule_at_iso=schedule_iso)
+    except Exception as exc:
+        log.exception("social publish failed for post %s", post_id)
+        await slack.update_message(
+            channel, message_ts,
+            text=f"⚠️ Publish failed: {str(exc)[:200]} — buttons are still live, try again.")
+        return Response(status_code=200)
+    new_status = "scheduled" if schedule_iso else "published"
+    await pool.execute(
+        "update social_posts set status=$2, schedule_at=$3, ghl_post_id=$4 where id=$1",
+        post_id, new_status, datetime.fromisoformat(when) if when else None, ghl_post_id)
+    note = f"scheduled for {when}" if schedule_iso else "publishing now"
+    await slack.update_message(
+        channel, message_ts, text=f"✅ Approved by <@{user}> — {note} (GHL post {ghl_post_id}).")
     return Response(status_code=200)

@@ -93,3 +93,11 @@ async def test_quick_followup_before_first_turn_processed(client, pool):
                                            text="oh and make it navy", ts="400.2",
                                            thread_ts="400.1"))
     assert (await pool.fetchval("select count(*) from jobs")) == 2
+
+
+async def test_social_channel_mention_enqueues(client, pool):
+    resp = await post_event(client, mention_event(event_id="EvSoc", channel="C0SOCIAL",
+                                                  text="<@UBOT> post something", ts="600.1"))
+    assert resp.status_code == 200
+    job = await pool.fetchrow("select data from jobs where name='bot_turn'")
+    assert json.loads(job["data"])["channel"] == "C0SOCIAL"

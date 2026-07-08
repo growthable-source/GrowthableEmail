@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.db import create_pool
-from app.routers import campaigns, slack, unsub, webhooks
+from app.routers import campaigns, media, slack, unsub, webhooks
 
 
 def create_app() -> FastAPI:
@@ -26,6 +26,7 @@ def create_app() -> FastAPI:
     app.include_router(webhooks.router)
     app.include_router(unsub.router)
     app.include_router(slack.router)
+    app.include_router(media.router)
 
     @app.get("/healthz")
     async def healthz():
