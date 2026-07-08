@@ -13,6 +13,15 @@ async def test_bot_tables_exist(pool):
     assert {"bot_sessions", "slack_events"} <= {r["table_name"] for r in rows}
 
 
+async def test_notify_columns_exist(pool):
+    campaign_cols = {r["column_name"] for r in await pool.fetch(
+        "select column_name from information_schema.columns where table_name='campaigns'")}
+    assert {"thread_ts", "channel"} <= campaign_cols
+    post_cols = {r["column_name"] for r in await pool.fetch(
+        "select column_name from information_schema.columns where table_name='social_posts'")}
+    assert {"channel", "notified_at"} <= post_cols
+
+
 async def test_social_tables_exist(pool):
     rows = await pool.fetch(
         "select table_name from information_schema.tables where table_schema='public'")

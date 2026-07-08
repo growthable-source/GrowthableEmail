@@ -186,10 +186,11 @@ class BotEngine(BaseBot):
                     return {"error": error}
             campaign_id = await pool.fetchval(
                 "insert into campaigns (name, subject, template_ref, template_version, "
-                "audience_filter, content) values ($1, $2, $3, 'v1', $4, $5) "
-                "returning id",
+                "audience_filter, content, thread_ts, channel) "
+                "values ($1, $2, $3, 'v1', $4, $5, $6, $7) returning id",
                 args["name"], args["subject"], template, json.dumps(audience_filter),
-                json.dumps(args["content"]))
+                json.dumps(args["content"]), self._turn_context["thread_ts"],
+                self._turn_context["channel"])
             await pool.execute(
                 "update bot_sessions set campaign_id=$1 where thread_ts=$2",
                 campaign_id, self._turn_context["thread_ts"])

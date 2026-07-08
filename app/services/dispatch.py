@@ -74,12 +74,13 @@ async def requeue_stale(pool, stale_minutes: int = 10) -> int:
     return int(result.split()[-1])
 
 
-async def promote_scheduled(pool) -> int:
-    """Activate scheduled campaigns whose time has arrived."""
-    result = await pool.execute(
+async def promote_scheduled(pool) -> list:
+    """Activate scheduled campaigns whose time has arrived. Returns the campaign ids
+    that just transitioned, so callers can announce them exactly once."""
+    rows = await pool.fetch(
         "update campaigns set status='dispatching' "
-        "where status='scheduled' and scheduled_at <= now()")
-    return int(result.split()[-1])
+        "where status='scheduled' and scheduled_at <= now() returning id")
+    return [r["id"] for r in rows]
 
 
 def _unsub_url(settings: Settings, email: str, campaign_id) -> str:

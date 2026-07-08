@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from app.services.dispatch import enqueue_campaign_sends
 from app.services.ghl import GHLClient
 from app.services.jobs import enqueue
+from app.services.notify import notify_campaign_going_out, notify_post_going_out
 from app.services.slack_client import SlackClient, verify_slack_signature
 
 log = logging.getLogger(__name__)
@@ -120,6 +121,7 @@ async def slack_interactions(request: Request):
         queued = await enqueue_campaign_sends(pool, campaign_id)
         when = value.get("when")
         scheduled_note = "sending now"
+        going_out_now = True
         if when:
             when_dt = datetime.fromisoformat(when)
             if when_dt > datetime.now(timezone.utc):
@@ -127,9 +129,12 @@ async def slack_interactions(request: Request):
                     "update campaigns set status='scheduled', scheduled_at=$2 where id=$1",
                     campaign_id, when_dt)
                 scheduled_note = f"scheduled for {when}"
+                going_out_now = False  # the worker announces this later, when it fires
         await slack.update_message(
             channel, message_ts,
             text=f"✅ Approved by <@{user}> — {queued} contacts queued, {scheduled_note}.")
+        if going_out_now:
+            await notify_campaign_going_out(pool, slack, campaign_id)
     return Response(status_code=200)
 
 
@@ -176,4 +181,6 @@ async def _handle_post_action(pool, settings, slack, action, value, channel,
     note = f"scheduled for {when}" if schedule_iso else "publishing now"
     await slack.update_message(
         channel, message_ts, text=f"✅ Approved by <@{user}> — {note} (GHL post {ghl_post_id}).")
+    if not schedule_iso:
+        await notify_post_going_out(pool, slack, post_id)
     return Response(status_code=200)

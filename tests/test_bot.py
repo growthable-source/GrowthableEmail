@@ -84,6 +84,7 @@ async def test_tool_call_creates_campaign_and_links_session(pool):
     campaign = await pool.fetchrow("select * from campaigns")
     assert campaign["template_ref"] == "newsletter"
     assert json.loads(campaign["content"]) == CONTENT
+    assert campaign["thread_ts"] == "100.1" and campaign["channel"] == "C0TEST"
     assert json.loads(campaign["audience_filter"]) == [
         {"field": "tags", "operator": "eq", "value": "newsletter"}]
     assert (await pool.fetchval("select campaign_id from bot_sessions")) == campaign["id"]

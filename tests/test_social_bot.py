@@ -44,6 +44,7 @@ async def test_draft_post_saves_row_and_previews(pool):
     await engine.handle_turn(TURN)
     row = await pool.fetchrow("select * from social_posts")
     assert row["status"] == "draft" and row["account_ids"] == ["acc1"]
+    assert row["channel"] == "C0SOCIAL"
     assert json.loads(row["content"]) == {"text": "Stop answering the same questions.",
                                           "media": ["https://x/img.png"]}
     assert row["thread_ts"] == "500.1"

@@ -111,10 +111,10 @@ class SocialBot(BaseBot):
                 return {"error": "account_ids must not be empty"}
             content = {"text": args["text"], "media": args.get("media_urls") or []}
             post_id = await pool.fetchval(
-                "insert into social_posts (thread_ts, account_ids, content) "
-                "values ($1, $2, $3) returning id",
-                self._turn_context["thread_ts"], args["account_ids"],
-                json.dumps(content))
+                "insert into social_posts (thread_ts, channel, account_ids, content) "
+                "values ($1, $2, $3, $4) returning id",
+                self._turn_context["thread_ts"], self._turn_context["channel"],
+                args["account_ids"], json.dumps(content))
             media_note = "".join(f"\n📎 {u}" for u in content["media"])
             await self._slack.post_message(
                 self._turn_context["channel"],

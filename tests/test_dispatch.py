@@ -133,7 +133,7 @@ async def test_promote_scheduled_when_due(pool):
     future = await pool.fetchval(
         "insert into campaigns (name, subject, template_ref, template_version, status, scheduled_at) "
         "values ('future', 's', 'newsletter', 'v1', 'scheduled', now() + interval '1 hour') returning id")
-    assert await promote_scheduled(pool) == 1
+    assert await promote_scheduled(pool) == [due]
     assert (await pool.fetchval("select status from campaigns where id=$1", due)) == "dispatching"
     assert (await pool.fetchval("select status from campaigns where id=$1", future)) == "scheduled"
 
