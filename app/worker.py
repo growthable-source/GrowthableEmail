@@ -7,6 +7,7 @@ from app.db import create_pool
 from app.services.bot import BotEngine
 from app.services.bot_base import process_bot_turns
 from app.services.social_bot import SocialBot
+from app.services.daily_report import maybe_post_daily_reports
 from app.services.dispatch import process_send_queue, promote_scheduled, requeue_stale
 from app.services.ghl import GHLClient
 from app.services.guardrails import check_and_pause
@@ -49,6 +50,7 @@ async def run_forever() -> None:
                     await notify_post_going_out(pool, slack, post_id)
             breached = await check_and_pause(pool, settings.alert_webhook_url)
             await process_writeback_jobs(pool, ghl)
+            await maybe_post_daily_reports(pool, slack, settings)
             if engines:
                 await process_bot_turns(pool, engines)
             if not breached:

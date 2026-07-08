@@ -104,6 +104,14 @@ image"). It confirms target accounts, drafts, shows the image, and posts
 Publish/Cancel buttons. Scheduled posts land in GHL Social Planner where they can
 also be edited or deleted.
 
+### Daily digest
+Each configured channel gets a once-a-day summary (not @channel-tagged — routine,
+not urgent) after `DAILY_REPORT_HOUR` local time (`BOT_TIMEZONE`, default 8am):
+the email channel gets sent/delivered/opened/clicked/bounced counts plus any
+guardrail-paused campaigns; the social channel gets published/scheduled/cancelled
+counts and what's coming up in the next 24h. No setup needed beyond the channels
+already configured for the bots.
+
 ### Go-live checklist (spec §11.9)
 - [ ] Seed test: `POST /campaigns/{id}/test` → inspect in Gmail: DKIM=news subdomain pass,
       List-Unsubscribe header present, one-click unsub works, plain-text part present,

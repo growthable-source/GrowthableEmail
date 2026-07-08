@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
     bot_timezone: str = "Australia/Sydney"
+    daily_report_hour: int = 8  # local hour (bot_timezone) the daily digest posts after
 
     @property
     def seed_list(self) -> list[str]:
