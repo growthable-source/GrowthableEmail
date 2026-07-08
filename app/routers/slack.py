@@ -52,14 +52,24 @@ async def slack_events(request: Request):
     etype = event.get("type")
     thread_ts = event.get("thread_ts") or event.get("ts")
     if etype == "message":
-        # only continue threads the bot owns; mention-copies are handled via app_mention
-        if "<@" in (event.get("text") or ""):
-            return {"ok": True}
+        # continue threads the bot owns — session exists OR an opening turn is still
+        # queued (covers quick follow-ups sent before the worker's first reply)
         known = await pool.fetchval(
-            "select 1 from bot_sessions where thread_ts=$1", thread_ts)
+            """select exists(select 1 from bot_sessions where thread_ts=$1)
+                   or exists(select 1 from jobs where name='bot_turn'
+                             and data->>'thread_ts' = $1)""", thread_ts)
         if not known:
             return {"ok": True}
     elif etype != "app_mention":
+        return {"ok": True}
+
+    # a tagged reply arrives twice (app_mention + message copy) under different
+    # event_ids — dedupe on the message itself right before enqueueing
+    message_key = f"msg:{event.get('channel')}:{event.get('ts')}"
+    fresh_message = await pool.fetchval(
+        "insert into slack_events (event_id) values ($1) "
+        "on conflict do nothing returning event_id", message_key)
+    if fresh_message is None:
         return {"ok": True}
 
     await enqueue(pool, "bot_turn", {

@@ -65,7 +65,31 @@ async def test_thread_reply_continues_known_session_only(client, pool):
                                            ts="200.3", thread_ts="100.1"))
     job = await pool.fetchrow("select data from jobs where name='bot_turn'")
     assert json.loads(job["data"])["thread_ts"] == "100.1"
-    # mention-containing thread reply is skipped (app_mention copy handles it)
+    # a reply mentioning a teammate still goes through
     await post_event(client, mention_event(event_id="Ev7", etype="message",
-                                           text="<@UBOT> hi again", ts="200.4", thread_ts="100.1"))
+                                           text="cc <@UTEAMMATE>", ts="200.4", thread_ts="100.1"))
+    assert (await pool.fetchval("select count(*) from jobs")) == 2
+
+
+async def test_tagged_thread_reply_processed_once(client, pool):
+    """A tagged reply arrives as BOTH app_mention and message copy (distinct event_ids,
+    same message ts) — only one turn may be enqueued."""
+    await pool.execute(
+        "insert into bot_sessions (thread_ts, channel) values ('100.1', 'C0TEST')")
+    await post_event(client, mention_event(event_id="EvA", etype="app_mention",
+                                           text="<@UBOT> again", ts="300.1", thread_ts="100.1"))
+    await post_event(client, mention_event(event_id="EvB", etype="message",
+                                           text="<@UBOT> again", ts="300.1", thread_ts="100.1"))
+    assert (await pool.fetchval("select count(*) from jobs where name='bot_turn'")) == 1
+
+
+async def test_quick_followup_before_first_turn_processed(client, pool):
+    """Replies sent before the worker creates the session continue the thread because
+    the opening bot_turn job is still queued."""
+    await post_event(client, mention_event(event_id="EvC", text="<@UBOT> start", ts="400.1"))
     assert (await pool.fetchval("select count(*) from jobs")) == 1
+    # no bot_session yet — but a queued job for the thread exists
+    await post_event(client, mention_event(event_id="EvD", etype="message",
+                                           text="oh and make it navy", ts="400.2",
+                                           thread_ts="400.1"))
+    assert (await pool.fetchval("select count(*) from jobs")) == 2
