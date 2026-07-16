@@ -37,6 +37,19 @@ async def resend_webhook(request: Request):
     pool = request.app.state.pool
     event_type = event.get("type", "")
     data = event.get("data") or {}
+
+    # Broadcast unsubscribes are handled by Resend (hosted link) and surface as
+    # contact.updated with unsubscribed=true — mirror them into suppressions.
+    if event_type.startswith("contact."):
+        email = normalize(data.get("email") or "")
+        if event_type in ("contact.updated", "contact.created") and \
+                data.get("unsubscribed") and email:
+            await add_suppression(pool, email, reason="unsubscribe", source="resend")
+        await pool.execute(
+            "insert into events (send_id, type, payload) values (null, $1, $2)",
+            event_type, json.dumps(event))
+        return {"ok": True}
+
     email_id = data.get("email_id")
     send = None
     if email_id:
@@ -44,6 +57,21 @@ async def resend_webhook(request: Request):
             """select s.id, s.ghl_contact_id, s.email, c.name as campaign_name
                from sends s join campaigns c on c.id = s.campaign_id
                where s.resend_email_id = $1""", email_id)
+    if send is None and data.get("broadcast_id"):
+        # broadcast recipients have no per-send email id until the first event
+        # arrives — match on (campaign, recipient) and backfill the email id
+        to = data.get("to")
+        recipient = to[0] if isinstance(to, list) and to else to
+        if recipient:
+            send = await pool.fetchrow(
+                """select s.id, s.ghl_contact_id, s.email, c.name as campaign_name
+                   from sends s join campaigns c on c.id = s.campaign_id
+                   where c.resend_broadcast_id = $1 and lower(s.email) = lower($2)""",
+                data["broadcast_id"], recipient)
+            if send is not None and email_id:
+                await pool.execute(
+                    "update sends set resend_email_id=$2 where id=$1 "
+                    "and resend_email_id is null", send["id"], email_id)
 
     await pool.execute(
         "insert into events (send_id, type, payload) values ($1, $2, $3)",

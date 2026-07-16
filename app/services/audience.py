@@ -25,14 +25,18 @@ async def sync_audience(pool, ghl, campaign_id: str) -> dict:
             continue
         await pool.execute(
             """insert into contacts_cache
-                   (ghl_contact_id, email, first_name, last_name, custom, tags, dnd, synced_at)
-               values ($1, $2, $3, $4, $5, $6, $7, now())
+                   (ghl_contact_id, email, first_name, last_name, custom, tags, dnd,
+                    country, timezone, synced_at)
+               values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
                on conflict (ghl_contact_id) do update set
                    email = excluded.email, first_name = excluded.first_name,
                    last_name = excluded.last_name, custom = excluded.custom,
-                   tags = excluded.tags, dnd = excluded.dnd, synced_at = now()""",
+                   tags = excluded.tags, dnd = excluded.dnd,
+                   country = excluded.country, timezone = excluded.timezone,
+                   synced_at = now()""",
             c["ghl_contact_id"], email, c["first_name"], c["last_name"],
             json.dumps(c["custom"]), c["tags"], c["dnd"],
+            c.get("country", ""), c.get("timezone", ""),
         )
         await pool.execute(
             "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, $2) "
@@ -44,4 +48,15 @@ async def sync_audience(pool, ghl, campaign_id: str) -> dict:
         await pool.execute(
             "update campaigns set status='ready' where id=$1 and status='draft'", cid
         )
-    return {"kept": kept, "dropped": dropped}
+    # country/timezone breakdown so the bot can discuss send-time targeting
+    rows = await pool.fetch(
+        """select coalesce(nullif(c.country, ''), 'unknown') as country, count(*) as n
+           from campaign_contacts cc join contacts_cache c using (ghl_contact_id)
+           where cc.campaign_id = $1 group by 1 order by n desc""", cid)
+    with_tz = await pool.fetchval(
+        """select count(*) from campaign_contacts cc
+           join contacts_cache c using (ghl_contact_id)
+           where cc.campaign_id = $1 and c.timezone <> ''""", cid)
+    return {"kept": kept, "dropped": dropped,
+            "countries": {r["country"]: r["n"] for r in rows},
+            "with_timezone": with_tz}

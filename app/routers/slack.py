@@ -6,7 +6,6 @@ from urllib.parse import parse_qs
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from app.services.dispatch import enqueue_campaign_sends
 from app.services.ghl import GHLClient
 from app.services.jobs import enqueue
 from app.services.notify import notify_campaign_going_out, notify_post_going_out
@@ -111,21 +110,39 @@ async def slack_interactions(request: Request):
         return Response(status_code=200)
 
     if action["action_id"] == "approve_send":
-        queued = await enqueue_campaign_sends(pool, campaign_id)
+        # the worker does the heavy lifting: 'broadcast' → one Resend broadcast to
+        # the whole audience; 'timed' → ramped queue targeting each contact's
+        # ideal local hour, throttled by per_day/per_hour
+        audience = await pool.fetchval(
+            "select count(*) from campaign_contacts where campaign_id=$1", campaign_id)
+        per_day, per_hour = value.get("per_day"), value.get("per_hour")
+        if per_day or per_hour:
+            await pool.execute(
+                "update campaigns set send_via='timed', per_day=$2, per_hour=$3 "
+                "where id=$1", campaign_id, per_day, per_hour)
+            limits = " · ".join(filter(None, [f"{per_day}/day" if per_day else None,
+                                              f"{per_hour}/hour" if per_hour else None]))
+            how = f"{audience} contacts ramped ({limits}, ideal local time)"
+        else:
+            await pool.execute(
+                "update campaigns set send_via='broadcast' where id=$1", campaign_id)
+            how = f"broadcast to {audience} contacts"
         when = value.get("when")
-        scheduled_note = "sending now"
-        going_out_now = True
-        if when:
-            when_dt = datetime.fromisoformat(when)
-            if when_dt > datetime.now(timezone.utc):
-                await pool.execute(
-                    "update campaigns set status='scheduled', scheduled_at=$2 where id=$1",
-                    campaign_id, when_dt)
-                scheduled_note = f"scheduled for {when}"
-                going_out_now = False  # the worker announces this later, when it fires
+        when_dt = datetime.fromisoformat(when) if when else None
+        if when_dt and when_dt > datetime.now(timezone.utc):
+            await pool.execute(
+                "update campaigns set status='scheduled', scheduled_at=$2 where id=$1",
+                campaign_id, when_dt)
+            scheduled_note = f"scheduled for {when}"
+            going_out_now = False  # the worker announces this later, when it fires
+        else:
+            await pool.execute(
+                "update campaigns set status='dispatching' where id=$1", campaign_id)
+            scheduled_note = "starting now"
+            going_out_now = True
         await slack.update_message(
             channel, message_ts,
-            text=f"✅ Approved by <@{user}> — {queued} contacts queued, {scheduled_note}.")
+            text=f"✅ Approved by <@{user}> — {how}, {scheduled_note}.")
         if going_out_now:
             await notify_campaign_going_out(pool, slack, campaign_id)
     return Response(status_code=200)

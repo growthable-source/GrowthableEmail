@@ -27,6 +27,8 @@ def _parse_contact(raw: dict) -> dict:
         or raw.get("lastNameLowerCase") or "",
         "tags": raw.get("tags") or [],
         "dnd": bool(raw.get("dnd")),
+        "country": (raw.get("country") or "").strip(),
+        "timezone": (raw.get("timezone") or "").strip(),
         "custom": {f["id"]: f.get("value") for f in raw.get("customFields") or []},
         "search_after": raw.get("searchAfter"),
     }

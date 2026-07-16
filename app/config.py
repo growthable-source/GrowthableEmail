@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     from_email: str
     send_rps: float = 2.0
     daily_send_cap: int = 500
+    ideal_send_hour: int = 10  # local hour timed sends target in each contact's timezone
     seed_emails: str = ""
     alert_webhook_url: str | None = None
     slack_enabled: bool = False

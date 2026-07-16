@@ -45,16 +45,29 @@ Workflow you must follow, in order:
    Write tight, useful copy — no hype. Show the user your draft copy in chat before
    creating the campaign, and iterate until they're happy. After a seed test, offer to
    iterate on the design with update_campaign (which requires a fresh seed test).
-3. create_campaign, then sync_audience and report the audience size.
+3. create_campaign, then sync_audience and report the audience size AND the country
+   breakdown it returns (plus how many contacts have an explicit timezone).
 4. send_seed_test and tell the user to check their inbox.
-5. Only after the user confirms the seed email looks good: propose_send. Ask when it
-   should go out (immediately or a scheduled time). propose_send posts approval buttons —
-   a human must click Send; you can never dispatch directly.
+5. Only after the user confirms the seed email looks good: propose_send. Ask two things:
+   - WHEN it should go out (immediately or a scheduled time).
+   - HOW: all at once (one Resend broadcast — no volume limit), or RAMPED with per_day
+     and/or per_hour limits. Ramped sends are timezone-targeted: each contact gets the
+     email at the ideal local hour (default 10am) in their timezone, resolved from the
+     GHL contact's timezone field, else their country, else assumed US. Sending
+     continues for up to 8 hours past the ideal hour each day, then rolls to the next
+     day — so with only a per_hour limit, roughly 8×per_hour can go out per day.
+     Recommend a ramp for the first large send on this domain (deliverability), and
+     use the country breakdown to tell the user when their audience will receive it.
+   propose_send posts approval buttons — a human must click Send; you can never
+   dispatch directly.
 
 Rules:
 - Never skip the seed test. Never call propose_send before send_seed_test succeeded.
-- Daily send cap and deliverability kill rules are enforced by the pipeline; if asked,
-  the current cap is in your context below.
+- There is NO hard cap on campaign size: a broadcast sends everything at once, and a
+  ramp uses whatever per_day/per_hour the user picks. Never tell the user a campaign
+  is impossible because of a cap. The daily send cap in your context only limits the
+  per-email drip queue (GHL enrollments); deliverability kill rules still pause
+  everything on bounce spikes.
 - Keep Slack replies short and skimmable. Use plain language.
 - If a tool returns an error, explain it briefly and suggest the fix."""
 
@@ -135,17 +148,33 @@ TOOLS = [
           "Counts of pending/completed background tagging jobs.", {}, []),
     _tool("propose_send",
           "Post the approval buttons for dispatch. Requires a prior successful seed test. "
-          "when_iso: ISO-8601 datetime with timezone offset, omit to send immediately.",
-          {"campaign_id": {"type": "string"}, "when_iso": {"type": "string"}},
+          "when_iso: ISO-8601 datetime with timezone offset, omit to send immediately. "
+          "Omit per_day AND per_hour to send everything at once as one Resend broadcast. "
+          "Set per_day and/or per_hour to ramp instead: sends then go out at the ideal "
+          "local hour in each contact's timezone (GHL timezone, else country, else US).",
+          {"campaign_id": {"type": "string"}, "when_iso": {"type": "string"},
+           "per_day": {"type": "integer", "minimum": 1,
+                       "description": "max emails per day for this campaign"},
+           "per_hour": {"type": "integer", "minimum": 1,
+                        "description": "max emails per hour for this campaign"}},
           ["campaign_id"]),
 ]
 
 
 def approval_blocks(campaign_id: str, name: str, subject: str, audience: int,
-                    when_iso: str | None) -> list:
-    value = json.dumps({"campaign_id": campaign_id, "when": when_iso})
+                    when_iso: str | None, per_day: int | None = None,
+                    per_hour: int | None = None) -> list:
+    value = json.dumps({"campaign_id": campaign_id, "when": when_iso,
+                        "per_day": per_day, "per_hour": per_hour})
+    if per_day or per_hour:
+        limits = " · ".join(filter(None, [f"{per_day}/day" if per_day else None,
+                                          f"{per_hour}/hour" if per_hour else None]))
+        how = f"ramped ({limits}), at the ideal local time per contact"
+    else:
+        how = "one broadcast, all at once"
     summary = (f"*Ready to send:* {name}\n*Subject:* {subject}\n"
-               f"*Audience:* {audience} contacts\n*When:* {when_iso or 'immediately'}")
+               f"*Audience:* {audience} contacts\n*How:* {how}\n"
+               f"*When:* {when_iso or 'immediately'}")
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
         {"type": "actions", "elements": [
@@ -168,7 +197,8 @@ class BotEngine(BaseBot):
         self._resend = resend or ResendClient(settings.resend_api_key, rps=settings.send_rps)
 
     def _system(self) -> str:
-        return (f"{super()._system()} Daily send cap: {self._settings.daily_send_cap}."
+        return (f"{super()._system()} Daily send cap (drip queue only — campaign "
+                f"broadcasts are uncapped): {self._settings.daily_send_cap}."
                 f"\n\n=== EMAIL BRAND GUIDE ===\n\n{BRAND_GUIDE}")
 
     async def _run_tool(self, name: str, args: dict):
@@ -265,7 +295,8 @@ class BotEngine(BaseBot):
             audience = await pool.fetchval(
                 "select count(*) from campaign_contacts where campaign_id=$1", campaign["id"])
             blocks = approval_blocks(str(campaign["id"]), campaign["name"],
-                                     campaign["subject"], audience, args.get("when_iso"))
+                                     campaign["subject"], audience, args.get("when_iso"),
+                                     args.get("per_day"), args.get("per_hour"))
             await self._slack.post_message(
                 self._turn_context["channel"], text="Campaign ready for approval",
                 blocks=blocks, thread_ts=self._turn_context["thread_ts"])

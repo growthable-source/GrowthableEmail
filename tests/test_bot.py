@@ -123,7 +123,8 @@ async def test_propose_send_posts_approval_buttons_after_seed(pool):
     action_ids = [e["action_id"] for e in buttons["blocks"][-1]["elements"]]
     assert action_ids == ["approve_send", "cancel_send"]
     value = json.loads(buttons["blocks"][-1]["elements"][0]["value"])
-    assert value == {"campaign_id": str(cid), "when": "2026-07-10T09:00:00+10:00"}
+    assert value == {"campaign_id": str(cid), "when": "2026-07-10T09:00:00+10:00",
+                     "per_day": None, "per_hour": None}
 
 
 async def test_claude_error_posts_apology_and_completes_job(pool):

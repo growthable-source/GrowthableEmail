@@ -39,8 +39,36 @@ suppression list. Spec: docs/spec.md. Runbook: see bottom of this file.
     POST /campaigns                      {name, subject, template_ref, template_version, audience_filter}
     POST /campaigns/{id}/sync-audience   pulls from GHL, applies ingest drop rules
     POST /campaigns/{id}/test            renders + sends to SEED_EMAILS — check headers, unsub, rendering
-    POST /campaigns/{id}/dispatch        fills the queue; the worker drains it under caps
+    POST /campaigns/{id}/dispatch        ops fallback: fills the per-email queue (capped drip)
     GET  /campaigns/{id}/report          delivered/open/click/bounce/complaint rollup
+
+### Broadcast sends (all at once)
+Campaigns approved through the Slack Send button without a ramp go out as a
+**single Resend Broadcast**: the worker bulk-imports the synced audience (CSV,
+one call — handles 50k+ contacts) into a per-campaign Resend segment, then
+creates the broadcast with `send: true` once the import completes.
+Personalization uses Resend merge tags (`{{{contact.first_name|there}}}`) and
+Resend hosts the unsubscribe flow (`{{{RESEND_UNSUBSCRIBE_URL}}}`); unsubscribes
+flow back as `contact.updated` webhook events into our suppression list.
+DAILY_SEND_CAP does **not** apply to broadcasts — only to the per-email drip
+queue (GHL enrollments, seed tests).
+Setup: apply `supabase/migrations/0006_broadcasts.sql` and subscribe the Resend
+webhook to the **contact.updated** event (in addition to the email.* events).
+
+### Ramped, timezone-targeted sends (per-day / per-hour)
+Tell the bot a per-day and/or per-hour amount when approving and the campaign is
+dispatched through the queue instead: each contact is scheduled for the next
+occurrence of `IDEAL_SEND_HOUR` (default 10am) **local time**, resolved from the
+GHL contact's `timezone` field, else its `country` (representative zone per
+country), else assumed US (America/Chicago). The worker throttles each ramped
+campaign by its own `per_day`/`per_hour` (independent of the global
+DAILY_SEND_CAP) and sends missing their local window by more than 8 hours roll
+to the next day's window — so a per-hour-only ramp moves roughly 8×per_hour per
+day. `sync-audience` returns the country breakdown so the bot can discuss
+delivery timing. Setup: apply `supabase/migrations/0007_timed_sends.sql` and
+re-run sync-audience so contacts pick up country/timezone. Throughput note:
+queue sends respect SEND_RPS (2/s ≈ 7,200/hour ceiling) — ask Resend for a rate
+increase before very aggressive ramps.
 
 ### Ramp schedule (spec §2 — adjust DAILY_SEND_CAP on the worker, then redeploy)
 | Day | DAILY_SEND_CAP | Segment |
@@ -83,7 +111,8 @@ Render services. Apply supabase/migrations/0002_bot.sql.
 
 Usage: tag @email-bot in the channel and describe the campaign. It will confirm the
 audience tag, draft copy, seed-test to SEED_EMAILS, and post Send/Cancel buttons.
-The seed test is mandatory; the daily cap and kill rules still apply.
+The seed test is mandatory; approved sends go out as one Resend Broadcast
+(uncapped — plan limit applies); kill rules still pause everything on bounce spikes.
 
 ### Social media bot
 Same Slack app, second channel. The bot drafts posts (brand voice §1-3 of the email

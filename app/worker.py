@@ -6,9 +6,11 @@ from app.config import get_settings
 from app.db import create_pool
 from app.services.bot import BotEngine
 from app.services.bot_base import process_bot_turns
+from app.services.broadcast import process_broadcast_campaigns
 from app.services.social_bot import SocialBot
 from app.services.daily_report import maybe_post_daily_reports
-from app.services.dispatch import process_send_queue, promote_scheduled, requeue_stale
+from app.services.dispatch import (ensure_timed_queues, process_send_queue,
+                                   promote_scheduled, requeue_stale)
 from app.services.ghl import GHLClient
 from app.services.guardrails import check_and_pause
 from app.services.notify import notify_campaign_going_out, notify_post_going_out
@@ -54,6 +56,10 @@ async def run_forever() -> None:
             if engines:
                 await process_bot_turns(pool, engines)
             if not breached:
+                broadcasts = await process_broadcast_campaigns(pool, settings, resend, slack)
+                if broadcasts:
+                    log.info("created %s broadcasts", broadcasts)
+                await ensure_timed_queues(pool, settings)
                 sent = await process_send_queue(pool, settings, resend)
                 if sent:
                     log.info("dispatched %s emails", sent)
