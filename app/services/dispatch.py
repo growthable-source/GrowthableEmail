@@ -133,6 +133,26 @@ def render_full_document(content: dict, first_name: str | None, last_name: str |
                     hash=hashlib.sha256(html.encode()).hexdigest())
 
 
+def render_outbound(content: dict, unsub_url: str) -> Rendered:
+    """Plain-text outbound email (Xovera engine) -> minimal HTML + text parts.
+    These are one-to-one cold emails, so the styling stays deliberately bare."""
+    text = (content.get("text_body") or "").strip()
+    if not text:
+        raise RenderError("outbound send has empty text_body")
+    paras = "".join(
+        f'<p style="margin:0 0 1em">{html_lib.escape(p).replace(chr(10), "<br>")}</p>'
+        for p in re.split(r"\n{2,}", text)
+    )
+    html = (
+        '<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;'
+        f'font-size:14px;color:#1c1917;line-height:1.6;max-width:600px">{paras}'
+        f'<p style="color:#a8a29e;font-size:12px">&mdash;<br>'
+        f'<a href="{unsub_url}" style="color:#a8a29e">Unsubscribe</a></p></body></html>'
+    )
+    return Rendered(html=html, text=f"{text}\n\nUnsubscribe: {unsub_url}",
+                    hash=hashlib.sha256(html.encode()).hexdigest())
+
+
 def build_headers(settings: Settings, unsub_url: str) -> dict:
     return {
         "List-Unsubscribe": f"<mailto:unsubscribe@{settings.from_domain}>, <{unsub_url}>",
@@ -151,7 +171,8 @@ async def _claim_batch(pool, limit: int) -> list[dict]:
                order by s.created_at
                limit $1
                for update of s skip locked)
-           returning id, campaign_id, ghl_contact_id, email, retry_count""",
+           returning id, campaign_id, ghl_contact_id, email, retry_count,
+                     subject_override, content_override""",
         limit,
     )
     return [dict(r) for r in rows]
@@ -194,12 +215,47 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
         else:
             to_send.append(send)
 
+    sent_count = 0
+
+    # Per-send personalized emails (outbound engine) render individually;
+    # everything else renders per campaign below.
+    overrides = [s for s in to_send if s["content_override"]]
+    to_send = [s for s in to_send if not s["content_override"]]
+    for send in overrides:
+        unsub = _unsub_url(settings, send["email"], send["campaign_id"])
+        try:
+            r = render_outbound(json.loads(send["content_override"]), unsub)
+        except RenderError as exc:
+            await _mark_transient_failure(pool, send["id"], send["retry_count"], str(exc))
+            continue
+        payload = {
+            "from": settings.from_email,
+            "to": [send["email"]],
+            "subject": send["subject_override"] or "Quick question",
+            "html": r.html,
+            "text": r.text,
+            "headers": build_headers(settings, unsub),
+        }
+        try:
+            email_id = await resend.send_email(payload)
+        except TransientSendError as exc:
+            await _mark_transient_failure(pool, send["id"], send["retry_count"], str(exc))
+            continue
+        except HardSendError as exc:
+            await pool.execute(
+                "update sends set status='failed', error=$2 where id=$1",
+                send["id"], str(exc)[:500])
+            continue
+        await pool.execute(
+            "update sends set status='sent', resend_email_id=$2, rendered_hash=$3, "
+            "sent_at=now() where id=$1",
+            send["id"], email_id, r.hash)
+        sent_count += 1
+
     # Group by campaign so each group is one render subprocess call
     by_campaign: dict = defaultdict(list)
     for send in to_send:
         by_campaign[send["campaign_id"]].append(send)
-
-    sent_count = 0
     for campaign_id, sends in by_campaign.items():
         campaign = await pool.fetchrow(
             "select subject, template_ref, content from campaigns where id=$1", campaign_id)

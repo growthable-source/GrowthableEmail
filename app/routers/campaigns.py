@@ -85,3 +85,65 @@ async def dispatch_campaign(request: Request, campaign_id: str):
 async def campaign_report(request: Request, campaign_id: str):
     campaign = await _get_campaign(request, campaign_id)
     return await campaign_report_data(request.app.state.pool, campaign["id"])
+
+
+# ---- Xovera outbound engine integration -----------------------------------------
+# The outbound engine sends one hand-approved, per-prospect email at a time.
+# It enrolls sends here (with subject/body overrides) instead of the GHL
+# webhook path, and checks suppressions before it even personalizes.
+
+class SuppressionCheckIn(BaseModel):
+    emails: list[str]
+
+
+@router.post("/suppressions/check")
+async def check_suppressions(request: Request, body: SuppressionCheckIn):
+    from app.services.suppressions import suppressed_subset
+    suppressed = await suppressed_subset(request.app.state.pool, body.emails)
+    return {"suppressed": sorted(suppressed)}
+
+
+class OutboundEnrollIn(BaseModel):
+    campaign_id: str
+    contact_id: str          # GHL contact id (engine syncs to GHL before sending)
+    email: str
+    subject: str
+    text_body: str
+    first_name: str = ""
+    last_name: str = ""
+
+
+@router.post("/outbound/enroll")
+async def outbound_enroll(request: Request, body: OutboundEnrollIn):
+    from app.services.suppressions import is_suppressed, normalize
+    pool = request.app.state.pool
+    email = normalize(body.email)
+    if await is_suppressed(pool, email):
+        return {"enrolled": False, "reason": "suppressed"}
+    campaign = await _get_campaign(request, body.campaign_id)
+    if campaign["status"] == "paused":
+        return {"enrolled": False, "reason": "campaign paused"}
+    await pool.execute(
+        """insert into contacts_cache (ghl_contact_id, email, first_name, last_name, custom)
+           values ($1, $2, $3, $4, '{}')
+           on conflict (ghl_contact_id) do update set
+               email=excluded.email, first_name=excluded.first_name,
+               last_name=excluded.last_name, synced_at=now()""",
+        body.contact_id, email, body.first_name, body.last_name)
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, $2) "
+        "on conflict do nothing", campaign["id"], body.contact_id)
+    inserted = await pool.fetchrow(
+        """insert into sends (campaign_id, ghl_contact_id, email,
+                              subject_override, content_override)
+           values ($1, $2, $3, $4, $5)
+           on conflict (campaign_id, ghl_contact_id) do nothing
+           returning id""",
+        campaign["id"], body.contact_id, email,
+        body.subject, json.dumps({"text_body": body.text_body}))
+    await pool.execute(
+        "update campaigns set status='dispatching' where id=$1 and status in ('draft','ready')",
+        campaign["id"])
+    if inserted is None:
+        return {"enrolled": False, "reason": "already enrolled"}
+    return {"enrolled": True, "send_id": str(inserted["id"])}
