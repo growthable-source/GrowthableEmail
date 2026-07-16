@@ -13,6 +13,7 @@ from app.services.dispatch import (ensure_timed_queues, process_send_queue,
                                    promote_scheduled, requeue_stale)
 from app.services.ghl import GHLClient
 from app.services.guardrails import check_and_pause
+from app.services.jobs import requeue_stale_jobs
 from app.services.notify import notify_campaign_going_out, notify_post_going_out
 from app.services.resend_client import ResendClient
 from app.services.slack_client import SlackClient
@@ -43,6 +44,7 @@ async def run_forever() -> None:
     while True:
         try:
             await requeue_stale(pool)
+            await requeue_stale_jobs(pool)
             promoted = await promote_scheduled(pool)
             due_posts = await notify_due_social_posts(pool)
             if slack is not None:

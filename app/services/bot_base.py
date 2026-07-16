@@ -17,6 +17,17 @@ HISTORY_LIMIT = 40
 MAX_JOBS_PER_PASS = 10
 
 
+def sanitize_history(messages: list) -> list:
+    """Make a (possibly truncated) history valid for the API: it must open with a
+    plain user text message. A blind tail slice can start mid assistant-turn or
+    with an orphaned tool_result, which the API rejects with a 400 — and once
+    persisted, that poisons every later turn in the thread."""
+    for i, m in enumerate(messages):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            return messages[i:]
+    return []
+
+
 class BaseBot:
     """Subclasses define `system_prompt`, `tools`, and `_run_tool`."""
 
@@ -42,7 +53,8 @@ class BaseBot:
         channel, thread_ts = data["channel"], data["thread_ts"]
         row = await self._pool.fetchrow(
             "select messages from bot_sessions where thread_ts=$1", thread_ts)
-        messages = json.loads(row["messages"]) if row else []
+        # sanitize on load too: repairs sessions persisted by older builds
+        messages = sanitize_history(json.loads(row["messages"])) if row else []
         messages.append({"role": "user", "content": f"<@{data['user']}>: {data['text']}"})
         self._turn_context = {"channel": channel, "thread_ts": thread_ts}
 
@@ -88,7 +100,7 @@ class BaseBot:
                values ($1, $2, $3, now())
                on conflict (thread_ts) do update set
                    messages=excluded.messages, updated_at=now()""",
-            thread_ts, channel, json.dumps(messages[-HISTORY_LIMIT:]))
+            thread_ts, channel, json.dumps(sanitize_history(messages[-HISTORY_LIMIT:])))
 
 
 async def process_bot_turns(pool, engines: dict[str, BaseBot],
