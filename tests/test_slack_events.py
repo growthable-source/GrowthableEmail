@@ -54,21 +54,27 @@ async def test_wrong_channel_and_bot_messages_ignored(client, pool):
     assert (await pool.fetchval("select count(*) from jobs")) == 0
 
 
-async def test_thread_reply_continues_known_session_only(client, pool):
-    unknown = mention_event(event_id="Ev5", etype="message", text="follow up",
-                            ts="200.2", thread_ts="100.1")
-    await post_event(client, unknown)
-    assert (await pool.fetchval("select count(*) from jobs")) == 0
-    await pool.execute(
-        "insert into bot_sessions (thread_ts, channel) values ('100.1', 'C0TEST')")
-    await post_event(client, mention_event(event_id="Ev6", etype="message", text="follow up",
-                                           ts="200.3", thread_ts="100.1"))
+async def test_untagged_reply_in_any_thread_enqueues(client, pool):
+    # no bot_sessions row, no queued job for this thread — still enqueues, because
+    # channel membership (not thread-known-ness) is the trust boundary
+    reply = mention_event(event_id="Ev5", etype="message", text="follow up",
+                          ts="200.2", thread_ts="100.1")
+    await post_event(client, reply)
     job = await pool.fetchrow("select data from jobs where name='bot_turn'")
     assert json.loads(job["data"])["thread_ts"] == "100.1"
     # a reply mentioning a teammate still goes through
     await post_event(client, mention_event(event_id="Ev7", etype="message",
                                            text="cc <@UTEAMMATE>", ts="200.4", thread_ts="100.1"))
     assert (await pool.fetchval("select count(*) from jobs")) == 2
+
+
+async def test_untagged_top_level_message_starts_new_thread(client, pool):
+    resp = await post_event(client, mention_event(event_id="Ev8", etype="message",
+                                                   text="build me a campaign", ts="900.1"))
+    assert resp.status_code == 200
+    job = await pool.fetchrow("select data from jobs where name='bot_turn'")
+    assert json.loads(job["data"]) == {"channel": "C0TEST", "thread_ts": "900.1",
+                                       "user": "URYAN", "text": "build me a campaign"}
 
 
 async def test_tagged_thread_reply_processed_once(client, pool):

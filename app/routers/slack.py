@@ -54,18 +54,11 @@ async def slack_events(request: Request):
         return {"ok": True}
 
     etype = event.get("type")
-    thread_ts = event.get("thread_ts") or event.get("ts")
-    if etype == "message":
-        # continue threads the bot owns — session exists OR an opening turn is still
-        # queued (covers quick follow-ups sent before the worker's first reply)
-        known = await pool.fetchval(
-            """select exists(select 1 from bot_sessions where thread_ts=$1)
-                   or exists(select 1 from jobs where name='bot_turn'
-                             and data->>'thread_ts' = $1)""", thread_ts)
-        if not known:
-            return {"ok": True}
-    elif etype != "app_mention":
+    if etype not in ("message", "app_mention"):
         return {"ok": True}
+    # channel membership is already the trust boundary (dedicated bot channels) —
+    # any message there starts or continues a conversation, tagged or not
+    thread_ts = event.get("thread_ts") or event.get("ts")
 
     # a tagged reply arrives twice (app_mention + message copy) under different
     # event_ids — dedupe on the message itself right before enqueueing
