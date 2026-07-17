@@ -9,7 +9,7 @@ from app.services.dispatch import (ensure_timed_queues, enqueue_timed_sends,
                                    process_send_queue)
 from app.services.resend_client import ResendClient
 from app.services.sendtime import next_ideal_time, resolve_timezone
-from tests.helpers import make_settings
+from tests.helpers import make_settings, verify_all_contacts
 
 RESEND_API = "https://api.resend.com/emails"
 
@@ -74,6 +74,7 @@ async def add_contact(pool, cid, i, country="", tz="", suppressed=False):
         await pool.execute(
             "insert into suppressions (email, reason, source) values ($1, 'complaint', 'resend')",
             f"u{i}@x.co")
+    await verify_all_contacts(pool)
 
 
 async def test_enqueue_timed_schedules_per_contact_timezone(pool):

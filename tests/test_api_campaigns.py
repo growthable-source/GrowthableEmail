@@ -66,6 +66,8 @@ async def test_dispatch_and_report_flow(client, pool):
         await pool.execute(
             "insert into campaign_contacts (campaign_id, ghl_contact_id) "
             "values ($1::uuid, $2)", campaign_id, f"c{i}")
+    from tests.helpers import verify_all_contacts
+    await verify_all_contacts(pool)
     resp = await client.post(f"/campaigns/{campaign_id}/dispatch")
     assert resp.status_code == 200 and resp.json() == {"queued": 2}
     # simulate a worker pass + one delivered event

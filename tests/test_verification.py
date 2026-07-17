@@ -146,6 +146,32 @@ async def test_pending_batch_reenqueues_poll(pool):
     assert await pool.fetchval("select count(*) from email_verifications") == 0
 
 
+async def test_queue_path_excludes_unverified_and_nonvalid(pool):
+    from app.services.dispatch import enqueue_campaign_sends
+    cid = await seed_campaign(pool, ["good@x.com", "risky@x.com", "novote@x.com"])
+    await upsert_verdicts(pool, [("good@x.com", "valid", "ok"),
+                                 ("risky@x.com", "risky", "role")])
+    queued = await enqueue_campaign_sends(pool, make_settings(), cid)
+    assert queued == 1
+    assert await pool.fetchval("select email from sends") == "good@x.com"
+
+
+async def test_timed_path_excludes_unverified(pool):
+    from app.services.dispatch import enqueue_timed_sends
+    cid = await seed_campaign(pool, ["good@x.com", "novote@x.com"])
+    await upsert_verdicts(pool, [("good@x.com", "valid", "ok")])
+    queued = await enqueue_timed_sends(pool, make_settings(), cid)
+    assert queued == 1
+
+
+async def test_broadcast_audience_excludes_unverified(pool):
+    from app.services.broadcast import _audience_csv
+    cid = await seed_campaign(pool, ["good@x.com", "novote@x.com"])
+    await upsert_verdicts(pool, [("good@x.com", "valid", "ok")])
+    csv_bytes, count = await _audience_csv(pool, cid, 90)
+    assert count == 1 and b"good@x.com" in csv_bytes and b"novote" not in csv_bytes
+
+
 async def test_provider_error_retries_job(pool):
     class BrokenClient(FakeVerifyClient):
         async def create_batch(self, emails):

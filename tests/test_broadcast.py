@@ -6,7 +6,7 @@ import respx
 from app.services.broadcast import (broadcast_full_html, process_broadcast_campaigns,
                                     render_broadcast_html)
 from app.services.resend_client import ResendClient
-from tests.helpers import make_settings
+from tests.helpers import make_settings, verify_all_contacts
 
 API = "https://api.resend.com"
 
@@ -34,6 +34,7 @@ async def seed_broadcast_campaign(pool, status="dispatching", n_contacts=2,
         await pool.execute(
             "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, $2)",
             cid, f"c{i}")
+    await verify_all_contacts(pool)
     return cid
 
 
@@ -85,6 +86,7 @@ async def test_full_flow_import_then_broadcast(pool):
     await pool.execute(
         "insert into suppressions (email, reason, source) values "
         "('sup@x.co', 'complaint', 'resend')")
+    await verify_all_contacts(pool)  # suppression, not verification, must exclude c9
 
     # pass 1: creates segment + starts the CSV import; import still processing
     created = await process_broadcast_campaigns(pool, make_settings(), make_resend())
@@ -175,7 +177,8 @@ async def test_broadcast_sends_do_not_count_against_daily_cap(pool):
         "insert into contacts_cache (ghl_contact_id, email) values ('q1', 'drip@x.co')")
     await pool.execute(
         "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'q1')", qid)
-    await enqueue_campaign_sends(pool, qid)
+    await verify_all_contacts(pool)
+    await enqueue_campaign_sends(pool, make_settings(), qid)
     settings = make_settings(daily_send_cap=2)  # 2 broadcast sends already recorded today
     sent = await process_send_queue(pool, settings, make_resend())
     assert sent == 1
