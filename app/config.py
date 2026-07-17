@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     bot_timezone: str = "Australia/Sydney"
     daily_report_hour: int = 8  # local hour (bot_timezone) the daily digest posts after
+    emailable_api_key: str = ""
+    verdict_ttl_days: int = 90       # verdicts older than this are re-verified
+    verify_approval_threshold: int = 1000  # verify runs above this need a human button-click
+    verify_cost_per_email: float = 0.0038  # USD, for the approval message estimate
 
     @property
     def seed_list(self) -> list[str]:

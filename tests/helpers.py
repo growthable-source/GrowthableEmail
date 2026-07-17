@@ -35,6 +35,14 @@ def make_settings(**overrides) -> Settings:
     return Settings(**defaults)
 
 
+async def verify_all_contacts(pool):
+    """Mark every cached contact verified-valid (for tests predating verification)."""
+    await pool.execute(
+        "insert into email_verifications (email, verdict) "
+        "select distinct email, 'valid' from contacts_cache "
+        "on conflict (email) do update set verdict='valid', verified_at=now()")
+
+
 def svix_headers(secret: str, payload: str, msg_id: str = "msg_1") -> dict:
     ts = str(int(time.time()))  # svix rejects timestamps outside its tolerance window
     key = base64.b64decode(secret.split("_", 1)[1])
