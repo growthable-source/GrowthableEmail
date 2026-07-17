@@ -8,6 +8,7 @@ from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.services.jobs import enqueue
 from app.services.suppressions import add_suppression, is_suppressed, normalize
+from app.services.verification import upsert_verdicts
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -91,6 +92,9 @@ async def resend_webhook(request: Request):
         if bounce_type != "Transient":  # treat unknown as hard (conservative)
             await add_suppression(pool, send["email"], reason="hard_bounce",
                                   source="resend", ghl_contact_id=send["ghl_contact_id"])
+            # feed the verification cache: a real-world bounce beats any provider verdict
+            await upsert_verdicts(pool, [(send["email"], "invalid", "bounced")],
+                                  provider="resend")
             await enqueue(pool, "ghl_writeback",
                           {"kind": "set_dnd", "contact_id": send["ghl_contact_id"]})
     elif event_type == "email.complained":

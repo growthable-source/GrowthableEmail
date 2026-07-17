@@ -64,6 +64,21 @@ async def test_hard_bounce_suppresses_and_dnds(client, pool):
     assert kinds == {"set_dnd"}
 
 
+async def test_hard_bounce_marks_verification_invalid(client, pool):
+    await seed_send(pool)
+    payload = event_payload("email.bounced", extra={"bounce": {"type": "Permanent"}})
+    await post_event(client, payload)
+    row = await pool.fetchrow(
+        "select verdict, reason, provider from email_verifications where email='u@x.co'")
+    assert (row["verdict"], row["reason"], row["provider"]) == ("invalid", "bounced", "resend")
+
+
+async def test_soft_bounce_leaves_verification_untouched(client, pool):
+    await seed_send(pool)
+    await post_event(client, event_payload("email.bounced", extra={"bounce": {"type": "Transient"}}))
+    assert (await pool.fetchval("select count(*) from email_verifications")) == 0
+
+
 async def test_soft_bounce_records_event_only(client, pool):
     await seed_send(pool)
     await post_event(client, event_payload("email.bounced", extra={"bounce": {"type": "Transient"}}))
