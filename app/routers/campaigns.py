@@ -141,8 +141,11 @@ async def outbound_enroll(request: Request, body: OutboundEnrollIn):
            returning id""",
         campaign["id"], body.contact_id, email,
         body.subject, json.dumps({"text_body": body.text_body}))
+    # 'completed' revives too: outbound campaigns drain and refill as the
+    # sales team approves more batches
     await pool.execute(
-        "update campaigns set status='dispatching' where id=$1 and status in ('draft','ready')",
+        "update campaigns set status='dispatching' "
+        "where id=$1 and status in ('draft','ready','completed')",
         campaign["id"])
     if inserted is None:
         return {"enrolled": False, "reason": "already enrolled"}

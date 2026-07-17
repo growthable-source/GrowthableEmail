@@ -91,3 +91,12 @@ async def test_dispatch_time_suppression_still_applies_to_overrides(pool, client
     sent = await process_send_queue(pool, settings, ResendClient("re_test", rps=10_000, backoff_base=0))
     assert sent == 0
     assert (await pool.fetchval("select status from sends")) == "suppressed"
+
+
+async def test_enroll_revives_completed_campaign(pool, client):
+    cid = await seed_outbound_campaign(pool)
+    await pool.execute("update campaigns set status='completed' where id=$1", cid)
+    resp = await client.post("/outbound/enroll", json=enroll_body(cid))
+    assert resp.json()["enrolled"] is True
+    assert (await pool.fetchval(
+        "select status from campaigns where id=$1", cid)) == "dispatching"
