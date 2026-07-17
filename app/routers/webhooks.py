@@ -37,6 +37,12 @@ async def resend_webhook(request: Request):
     pool = request.app.state.pool
     event_type = event.get("type", "")
     data = event.get("data") or {}
+
+    if event_type == "email.received":                # inbound reply
+        from app.services.inbound import handle_received
+        await handle_received(pool, data)
+        return {"ok": True}
+
     email_id = data.get("email_id")
     send = None
     if email_id:

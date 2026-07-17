@@ -228,8 +228,10 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
         except RenderError as exc:
             await _mark_transient_failure(pool, send["id"], send["retry_count"], str(exc))
             continue
+        from app.services.domains import pick_from
+        from_email, from_domain = await pick_from(pool, settings)
         payload = {
-            "from": settings.from_email,
+            "from": from_email,
             "to": [send["email"]],
             "subject": send["subject_override"] or "Quick question",
             "html": r.html,
@@ -248,8 +250,8 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
             continue
         await pool.execute(
             "update sends set status='sent', resend_email_id=$2, rendered_hash=$3, "
-            "sent_at=now() where id=$1",
-            send["id"], email_id, r.hash)
+            "from_domain=$4, sent_at=now() where id=$1",
+            send["id"], email_id, r.hash, from_domain)
         sent_count += 1
 
     # Group by campaign so each group is one render subprocess call

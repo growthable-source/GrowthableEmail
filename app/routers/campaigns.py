@@ -150,3 +150,63 @@ async def outbound_enroll(request: Request, body: OutboundEnrollIn):
     if inserted is None:
         return {"enrolled": False, "reason": "already enrolled"}
     return {"enrolled": True, "send_id": str(inserted["id"])}
+
+
+@router.get("/outbound/activity")
+async def outbound_activity(request: Request, since: str | None = None, limit: int = 1000):
+    """Engagement + replies feed the outbound engine polls to drive sequences.
+    One row per send with event timestamps; replies joined by address."""
+    pool = request.app.state.pool
+    rows = await pool.fetch(
+        """select s.email, s.ghl_contact_id, s.campaign_id::text, s.status,
+                  s.subject_override, s.sent_at,
+                  min(e.occurred_at) filter (where e.type='email.opened')  as opened_at,
+                  min(e.occurred_at) filter (where e.type='email.clicked') as clicked_at,
+                  min(e.occurred_at) filter (where e.type='email.bounced') as bounced_at,
+                  r.classification as reply_classification,
+                  r.summary as reply_summary,
+                  r.created_at as replied_at
+           from sends s
+           left join events e on e.send_id = s.id
+           left join lateral (select classification, summary, created_at from replies
+                              where from_email = s.email and processed
+                              order by created_at desc limit 1) r on true
+           where s.content_override is not null
+             and ($1::timestamptz is null or
+                  greatest(coalesce(s.sent_at, s.created_at),
+                           coalesce(r.created_at, s.created_at)) >= $1::timestamptz)
+           group by s.id, r.classification, r.summary, r.created_at
+           order by s.created_at desc
+           limit $2""",
+        since, limit)
+    return {"data": [dict(r) for r in rows], "count": len(rows)}
+
+
+class DomainIn(BaseModel):
+    domain: str
+    from_user: str = "ryan"
+    from_name: str = "Ryan at Xovera"
+    daily_cap: int = 30
+
+
+@router.post("/outbound/domains")
+async def add_sending_domain(request: Request, body: DomainIn):
+    pool = request.app.state.pool
+    row = await pool.fetchrow(
+        """insert into sending_domains (domain, from_user, from_name, daily_cap)
+           values ($1, $2, $3, $4)
+           on conflict (domain) do update set active = true, paused_reason = null
+           returning *""",
+        body.domain.lower().strip(), body.from_user, body.from_name, body.daily_cap)
+    return dict(row)
+
+
+@router.get("/outbound/domains")
+async def list_sending_domains(request: Request):
+    pool = request.app.state.pool
+    rows = await pool.fetch(
+        """select d.*, count(s.id) filter (where s.sent_at >= date_trunc('day', now()))
+                  as sent_today
+           from sending_domains d left join sends s on s.from_domain = d.domain
+           group by d.id order by d.created_at""")
+    return {"data": [dict(r) for r in rows]}

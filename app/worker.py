@@ -9,7 +9,9 @@ from app.services.bot_base import process_bot_turns
 from app.services.social_bot import SocialBot
 from app.services.daily_report import maybe_post_daily_reports
 from app.services.dispatch import process_send_queue, promote_scheduled, requeue_stale
+from app.services.domains import adjust_and_guard
 from app.services.ghl import GHLClient
+from app.services.inbound import process_reply_jobs
 from app.services.guardrails import check_and_pause
 from app.services.notify import notify_campaign_going_out, notify_post_going_out
 from app.services.resend_client import ResendClient
@@ -38,9 +40,15 @@ async def run_forever() -> None:
                 pool=pool, settings=settings, ghl=ghl, slack=slack)
     log.info("worker up: cap=%s rps=%s slack=%s channels=%s", settings.daily_send_cap,
              settings.send_rps, settings.slack_enabled, list(engines))
+    import time
+    last_domain_check = 0.0
     while True:
         try:
             await requeue_stale(pool)
+            await process_reply_jobs(pool, settings)
+            if time.monotonic() - last_domain_check > 3600:
+                await adjust_and_guard(pool, settings)
+                last_domain_check = time.monotonic()
             promoted = await promote_scheduled(pool)
             due_posts = await notify_due_social_posts(pool)
             if slack is not None:
