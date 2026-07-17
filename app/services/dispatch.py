@@ -133,9 +133,11 @@ def render_full_document(content: dict, first_name: str | None, last_name: str |
                     hash=hashlib.sha256(html.encode()).hexdigest())
 
 
-def render_outbound(content: dict, unsub_url: str) -> Rendered:
+def render_outbound(content: dict, unsub_url: str,
+                    postal_address: str = "") -> Rendered:
     """Plain-text outbound email (Xovera engine) -> minimal HTML + text parts.
-    These are one-to-one cold emails, so the styling stays deliberately bare."""
+    These are one-to-one cold emails, so the styling stays deliberately bare.
+    CAN-SPAM: the physical postal address renders in the footer when set."""
     text = (content.get("text_body") or "").strip()
     if not text:
         raise RenderError("outbound send has empty text_body")
@@ -143,13 +145,15 @@ def render_outbound(content: dict, unsub_url: str) -> Rendered:
         f'<p style="margin:0 0 1em">{html_lib.escape(p).replace(chr(10), "<br>")}</p>'
         for p in re.split(r"\n{2,}", text)
     )
+    addr_html = (f'{html_lib.escape(postal_address)}<br>' if postal_address else "")
     html = (
         '<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;'
         f'font-size:14px;color:#1c1917;line-height:1.6;max-width:600px">{paras}'
-        f'<p style="color:#a8a29e;font-size:12px">&mdash;<br>'
+        f'<p style="color:#a8a29e;font-size:12px">&mdash;<br>{addr_html}'
         f'<a href="{unsub_url}" style="color:#a8a29e">Unsubscribe</a></p></body></html>'
     )
-    return Rendered(html=html, text=f"{text}\n\nUnsubscribe: {unsub_url}",
+    addr_text = f"{postal_address}\n" if postal_address else ""
+    return Rendered(html=html, text=f"{text}\n\n{addr_text}Unsubscribe: {unsub_url}",
                     hash=hashlib.sha256(html.encode()).hexdigest())
 
 
@@ -224,7 +228,8 @@ async def process_send_queue(pool, settings: Settings, resend: ResendClient) -> 
     for send in overrides:
         unsub = _unsub_url(settings, send["email"], send["campaign_id"])
         try:
-            r = render_outbound(json.loads(send["content_override"]), unsub)
+            r = render_outbound(json.loads(send["content_override"]), unsub,
+                                settings.postal_address)
         except RenderError as exc:
             await _mark_transient_failure(pool, send["id"], send["retry_count"], str(exc))
             continue

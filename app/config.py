@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     slack_social_channel_id: str = ""
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
+    postal_address: str = ""   # CAN-SPAM physical address for outbound footers
     bot_timezone: str = "Australia/Sydney"
     daily_report_hour: int = 8  # local hour (bot_timezone) the daily digest posts after
 
