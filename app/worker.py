@@ -60,14 +60,16 @@ async def run_forever() -> None:
             breached = await check_and_pause(pool, settings.alert_webhook_url,
                                              slack=slack,
                                              channel=settings.slack_channel_id)
-            await process_writeback_jobs(pool, ghl)
+            # humans first: a deep writeback/verification backlog must never leave
+            # a Slack message unanswered for half an hour (2026-07-18 incident)
+            if engines:
+                await process_bot_turns(pool, engines)
             if verifier is not None:
                 await process_verification_jobs(pool, settings, verifier, slack=slack)
             else:
                 await warn_missing_verifier(pool, slack)
             await maybe_post_daily_reports(pool, slack, settings)
-            if engines:
-                await process_bot_turns(pool, engines)
+            await process_writeback_jobs(pool, ghl)
             if not breached:
                 broadcasts = await process_broadcast_campaigns(pool, settings, resend, slack)
                 if broadcasts:
