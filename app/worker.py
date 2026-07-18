@@ -61,7 +61,7 @@ async def run_forever() -> None:
                                              channel=settings.slack_channel_id)
             await process_writeback_jobs(pool, ghl)
             if verifier is not None:
-                await process_verification_jobs(pool, settings, verifier)
+                await process_verification_jobs(pool, settings, verifier, slack=slack)
             await maybe_post_daily_reports(pool, slack, settings)
             if engines:
                 await process_bot_turns(pool, engines)

@@ -98,7 +98,45 @@ async def _enqueue_verdict_tags(pool, results: list[tuple]) -> None:
             "tags": [flagged[r["email"]]]})
 
 
-async def process_verification_jobs(pool, settings: Settings, client,
+async def _notify_progress(pool, slack, campaign_id, before_remaining: int,
+                           after_remaining: int) -> None:
+    """Proactive progress in the campaign thread: milestone posts at each 25%
+    crossing, and a completion post with the verdict breakdown (Ryan's rule:
+    transparent progress, no babysitting)."""
+    campaign = await pool.fetchrow(
+        "select name, channel, thread_ts from campaigns where id=$1::uuid", campaign_id)
+    if campaign is None or not campaign["channel"]:
+        return
+    total = await pool.fetchval(
+        """select count(distinct c.email) from campaign_contacts cc
+           join contacts_cache c using (ghl_contact_id) where cc.campaign_id=$1::uuid""",
+        campaign_id)
+    if not total:
+        return
+    if after_remaining == 0:
+        s = await verification_summary(pool, campaign_id)
+        valid = s.get("valid", 0)
+        invalid = s.get("invalid", 0)
+        risky = s.get("risky", 0) + s.get("unknown", 0)
+        await slack.post_message(
+            campaign["channel"],
+            text=f"✅ *{campaign['name']}* audience verification finished — "
+                 f"{valid} valid, {invalid} invalid, {risky} risky. "
+                 f"{invalid + risky} bad addresses will be skipped automatically. "
+                 "Say 'resume this campaign' and I'll get it moving.",
+            thread_ts=campaign["thread_ts"])
+        return
+    done_before, done_after = total - before_remaining, total - after_remaining
+    if (done_after * 4) // total > (done_before * 4) // total:  # crossed a 25% line
+        pct = done_after * 100 // total
+        await slack.post_message(
+            campaign["channel"],
+            text=f"⏳ *{campaign['name']}* verification {pct}% — "
+                 f"{done_after:,}/{total:,} checked.",
+            thread_ts=campaign["thread_ts"])
+
+
+async def process_verification_jobs(pool, settings: Settings, client, slack=None,
                                     backoff_seconds: int = 60) -> int:
     """One worker pass: drain verify_submit and verify_poll jobs. A still-processing
     provider batch re-enqueues its poll (completing the old job, so retry_limit only
@@ -109,7 +147,9 @@ async def process_verification_jobs(pool, settings: Settings, client,
             emails = await unverified_emails(pool, job["data"]["campaign_id"])
             for chunk in _chunks(emails, BATCH_CHUNK):
                 batch_id = await client.create_batch(chunk)
-                await enqueue(pool, "verify_poll", {"batch_id": batch_id},
+                await enqueue(pool, "verify_poll",
+                              {"batch_id": batch_id,
+                               "campaign_id": job["data"]["campaign_id"]},
                               start_after_seconds=POLL_DELAY_SECONDS)
         except Exception:
             log.exception("verify_submit job %s failed", job["id"])
@@ -127,8 +167,14 @@ async def process_verification_jobs(pool, settings: Settings, client,
                               start_after_seconds=POLL_DELAY_SECONDS)
                 continue
             results = [(r["email"], *map_result(r)) for r in raw]
+            campaign_id = job["data"].get("campaign_id")
+            notify = slack is not None and campaign_id is not None
+            before = await unverified_count(pool, campaign_id) if notify else 0
             await upsert_verdicts(pool, results)
             await _enqueue_verdict_tags(pool, results)
+            if notify:
+                after = await unverified_count(pool, campaign_id)
+                await _notify_progress(pool, slack, campaign_id, before, after)
         except Exception:
             log.exception("verify_poll job %s failed", job["id"])
             await fail_job(pool, job["id"], backoff_seconds=backoff_seconds)

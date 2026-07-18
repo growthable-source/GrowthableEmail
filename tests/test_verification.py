@@ -184,6 +184,61 @@ async def test_broadcast_audience_excludes_unverified(pool):
     assert count == 1 and b"good@x.com" in csv_bytes and b"novote" not in csv_bytes
 
 
+class FakeSlack:
+    def __init__(self):
+        self.posts = []
+
+    async def post_message(self, channel, text=None, blocks=None, thread_ts=None):
+        self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        return "1.1"
+
+
+async def test_completion_posted_to_campaign_thread(pool):
+    cid = await seed_campaign(pool, ["good@x.com", "dead@x.com"])
+    await pool.execute(
+        "update campaigns set channel='C0TEST', thread_ts='100.1' where id=$1", cid)
+    client = FakeVerifyClient(results={
+        "dead@x.com": {"state": "undeliverable", "reason": "rejected_email"}})
+    settings, slack = make_settings(), FakeSlack()
+    await request_verification(pool, settings, cid)
+    for _ in range(5):
+        await pool.execute("update jobs set start_after=now() "
+                           "where name in ('verify_submit', 'verify_poll') and state='created'")
+        await process_verification_jobs(pool, settings, client, slack=slack)
+    done = [p for p in slack.posts if "✅" in p["text"]]
+    assert len(done) == 1  # exactly one completion post
+    assert done[0]["channel"] == "C0TEST" and done[0]["thread_ts"] == "100.1"
+    assert "1 valid" in done[0]["text"] and "1 invalid" in done[0]["text"]
+
+
+async def test_progress_milestones_posted(pool, monkeypatch):
+    from app.services import verification
+    monkeypatch.setattr(verification, "BATCH_CHUNK", 1)  # 4 emails -> 4 batches
+    cid = await seed_campaign(pool, [f"u{i}@x.com" for i in range(4)])
+    await pool.execute(
+        "update campaigns set channel='C0TEST', thread_ts='100.1' where id=$1", cid)
+    settings, slack, client = make_settings(), FakeSlack(), FakeVerifyClient()
+    await request_verification(pool, settings, cid)
+    for _ in range(8):
+        await pool.execute("update jobs set start_after=now() "
+                           "where name in ('verify_submit', 'verify_poll') and state='created'")
+        await process_verification_jobs(pool, settings, client, slack=slack)
+    progress = [p["text"] for p in slack.posts if "⏳" in p["text"]]
+    assert any("25%" in t for t in progress)
+    assert any("50%" in t for t in progress)
+    assert any("75%" in t for t in progress)
+    assert sum("✅" in p["text"] for p in slack.posts) == 1  # and one completion
+
+
+async def test_no_slack_no_posts_pipeline_still_works(pool):
+    # regression: default slack=None path (also covers API-only campaigns)
+    cid = await seed_campaign(pool, ["a@x.com"])
+    settings, client = make_settings(), FakeVerifyClient()
+    await request_verification(pool, settings, cid)
+    await drain_verification(pool, settings, client)
+    assert await unverified_count(pool, cid) == 0
+
+
 async def test_provider_error_retries_job(pool):
     class BrokenClient(FakeVerifyClient):
         async def create_batch(self, emails):
