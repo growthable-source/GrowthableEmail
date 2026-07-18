@@ -46,3 +46,42 @@ async def test_complaint_breach_pauses_and_alerts(pool):
 async def test_low_volume_days_never_trip(pool):
     await seed_day(pool, sent=10, bounced=5, complained=2)  # tiny sample
     assert await check_and_pause(pool) is False
+
+
+class FakeSlack:
+    def __init__(self):
+        self.posts = []
+
+    async def post_message(self, channel, text=None, blocks=None, thread_ts=None):
+        self.posts.append({"channel": channel, "text": text})
+        return "1.1"
+
+
+async def test_breach_alerts_slack_channel_with_campaign_names(pool):
+    await seed_day(pool, sent=1000, bounced=40, complained=0)
+    slack = FakeSlack()
+    assert await check_and_pause(pool, slack=slack, channel="C0TEST") is True
+    assert len(slack.posts) == 1
+    text = slack.posts[0]["text"]
+    assert slack.posts[0]["channel"] == "C0TEST"
+    assert "<!channel>" in text and "x" in text        # pings + names the campaign
+    assert "bounce" in text.lower()
+
+
+async def test_breach_alerts_only_once_not_every_tick(pool):
+    await seed_day(pool, sent=1000, bounced=40, complained=0)
+    slack = FakeSlack()
+    assert await check_and_pause(pool, slack=slack, channel="C0TEST") is True
+    # next worker tick: still breached (rates persist all day) but nothing newly paused
+    assert await check_and_pause(pool, slack=slack, channel="C0TEST") is True
+    assert len(slack.posts) == 1
+
+
+async def test_webhook_not_spammed_on_repeat_ticks(pool):
+    await seed_day(pool, sent=1000, bounced=40, complained=0)
+    with respx.mock:
+        alert = respx.post("https://hooks.example.com/alert").mock(
+            return_value=httpx.Response(200))
+        await check_and_pause(pool, alert_webhook_url="https://hooks.example.com/alert")
+        await check_and_pause(pool, alert_webhook_url="https://hooks.example.com/alert")
+        assert alert.call_count == 1

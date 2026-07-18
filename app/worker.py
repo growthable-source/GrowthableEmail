@@ -56,7 +56,9 @@ async def run_forever() -> None:
                     await notify_campaign_going_out(pool, slack, campaign_id)
                 for post_id in due_posts:
                     await notify_post_going_out(pool, slack, post_id)
-            breached = await check_and_pause(pool, settings.alert_webhook_url)
+            breached = await check_and_pause(pool, settings.alert_webhook_url,
+                                             slack=slack,
+                                             channel=settings.slack_channel_id)
             await process_writeback_jobs(pool, ghl)
             if verifier is not None:
                 await process_verification_jobs(pool, settings, verifier)
