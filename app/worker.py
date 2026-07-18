@@ -74,7 +74,7 @@ async def run_forever() -> None:
                 broadcasts = await process_broadcast_campaigns(pool, settings, resend, slack)
                 if broadcasts:
                     log.info("created %s broadcasts", broadcasts)
-                await ensure_timed_queues(pool, settings)
+                await ensure_timed_queues(pool, settings, slack)
                 sent = await process_send_queue(pool, settings, resend)
                 if sent:
                     log.info("dispatched %s emails", sent)

@@ -137,3 +137,20 @@ async def test_maybe_post_skips_unconfigured_channel(pool):
     morning = datetime(2026, 7, 9, 9, 0, tzinfo=SYD)
     await maybe_post_daily_reports(pool, slack, settings, now=morning)
     assert {p["channel"] for p in slack.posts} == {"C0TEST"}
+
+
+async def test_digest_shows_ramp_progress(pool):
+    from app.services.daily_report import build_email_stats, format_email_report
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status, "
+        "send_via, per_day) values ('July Ramp', 's', 'custom', 'v1', 'dispatching', "
+        "'timed', 5000) returning id")
+    for i, status in enumerate(["sent", "sent", "queued"]):
+        await pool.execute(
+            "insert into sends (campaign_id, ghl_contact_id, email, status, sent_at) "
+            "values ($1, $2, $3, $4, case when $4='sent' then now() end)",
+            cid, f"c{i}", f"u{i}@x.co", status)
+    stats = await build_email_stats(pool)
+    assert stats["ramps"] == [{"name": "July Ramp", "sent": 2, "remaining": 1}]
+    report = format_email_report(stats)
+    assert "*July Ramp* ramp: 2/3 sent (66%), 1 to go." in report

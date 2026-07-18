@@ -74,10 +74,13 @@ async def enqueue_timed_sends(pool, settings: Settings, campaign_id) -> int:
     return len(records)
 
 
-async def ensure_timed_queues(pool, settings: Settings) -> None:
-    """Fill the queue for approved timed campaigns (idempotent: runs once each)."""
+async def ensure_timed_queues(pool, settings: Settings, slack=None) -> None:
+    """Fill the queue for approved timed campaigns (idempotent: runs once each).
+    Posts the launch confirmation from HERE, not the approval click — this is the
+    moment the queue physically exists, and it fires for every launch path
+    (button, scheduled promotion, or a manual status flip in SQL)."""
     rows = await pool.fetch(
-        """select id from campaigns c
+        """select id, name, channel, thread_ts, per_day, per_hour from campaigns c
            where status='dispatching' and send_via='timed'
              and not exists (select 1 from sends s where s.campaign_id = c.id)""")
     for r in rows:
@@ -85,8 +88,21 @@ async def ensure_timed_queues(pool, settings: Settings) -> None:
         if queued == 0:
             await pool.execute("update campaigns set status='paused' where id=$1", r["id"])
             log.error("timed campaign %s paused: audience empty after drop rules", r["id"])
-        else:
-            log.info("timed campaign %s queued %s sends", r["id"], queued)
+            continue
+        log.info("timed campaign %s queued %s sends", r["id"], queued)
+        if slack is not None and r["channel"]:
+            first = await pool.fetchval(
+                "select min(next_attempt_at) from sends where campaign_id=$1", r["id"])
+            limits = " · ".join(filter(None, [
+                f"{r['per_day']}/day" if r["per_day"] else None,
+                f"{r['per_hour']}/hour" if r["per_hour"] else None])) or "no ramp limits"
+            await slack.post_message(
+                r["channel"],
+                text=f"<!channel> 🚀 *{r['name']}* is LAUNCHED — {queued:,} verified "
+                     f"recipients queued ({limits}), each timed to ~10am local. "
+                     f"First wave: {first:%Y-%m-%d %H:%M} UTC. Daily progress lands "
+                     "in the morning digest.",
+                thread_ts=r["thread_ts"])
 
 
 async def send_seed(pool, settings: Settings, resend: ResendClient, campaign) -> list[str]:

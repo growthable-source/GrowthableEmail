@@ -183,3 +183,27 @@ async def test_missed_window_rolls_to_next_day(pool):
     local = row["next_attempt_at"].astimezone(ZoneInfo(row["timezone"]))
     assert local.hour == 10
     assert row["next_attempt_at"] > datetime.now(timezone.utc)
+
+
+async def test_queue_fill_posts_launch_confirmation(pool):
+    class FakeSlack:
+        def __init__(self):
+            self.posts = []
+
+        async def post_message(self, channel, text=None, blocks=None, thread_ts=None):
+            self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+            return "1.1"
+
+    cid = await seed_timed_campaign(pool, per_day=5000, per_hour=600)
+    await pool.execute(
+        "update campaigns set channel='C0TEST', thread_ts='100.1' where id=$1", cid)
+    await add_contact(pool, cid, 0)
+    slack = FakeSlack()
+    await ensure_timed_queues(pool, make_settings(), slack)
+    launch = [p for p in slack.posts if "LAUNCHED" in p["text"]]
+    assert len(launch) == 1
+    assert launch[0]["channel"] == "C0TEST" and launch[0]["thread_ts"] == "100.1"
+    assert "5000/day" in launch[0]["text"] and "600/hour" in launch[0]["text"]
+    # idempotent: second pass queues nothing, posts nothing
+    await ensure_timed_queues(pool, make_settings(), slack)
+    assert sum("LAUNCHED" in p["text"] for p in slack.posts) == 1
