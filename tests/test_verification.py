@@ -286,3 +286,26 @@ async def test_submit_defers_while_batches_in_flight(pool):
     all_emails = [e for b in client.batches.values() for e in b]
     assert sorted(all_emails) == ["a@x.com", "b@x.com"]  # a@x.com billed exactly once
     assert await unverified_count(pool, cid_b) == 0
+
+
+async def test_stalled_batch_abandoned_after_max_polls(pool):
+    from app.services import verification
+
+    class PendingClient(FakeVerifyClient):
+        async def get_batch(self, batch_id):
+            return None
+    cid = await seed_campaign(pool, ["a@x.com"])
+    settings = make_settings()
+    await request_verification(pool, settings, cid)
+    client = PendingClient()
+    await drain_verification(pool, settings, client, passes=1)  # submit -> poll
+    # fast-forward: mark the pending poll as one attempt from the cap
+    await pool.execute(
+        "update jobs set data = jsonb_set(data, '{attempts}', to_jsonb($1::int)) "
+        "where name='verify_poll' and state='created'",
+        verification.MAX_POLL_ATTEMPTS - 1)
+    await drain_verification(pool, settings, client, passes=1)
+    # abandoned: no created/active poll jobs remain to jam the in-flight guard
+    assert await pool.fetchval(
+        "select count(*) from jobs where name='verify_poll' "
+        "and state in ('created', 'active')") == 0

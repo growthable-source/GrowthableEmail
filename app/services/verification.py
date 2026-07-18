@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 
 BATCH_CHUNK = 1000       # emails per Emailable batch
 POLL_DELAY_SECONDS = 30
+MAX_POLL_ATTEMPTS = 240  # ~2h at 30s: a batch stalled this long (e.g. credits ran
+                         # out mid-run) is abandoned so it can't jam the pipeline
 VERDICT_TAGS = {"invalid": "email-invalid", "risky": "email-risky",
                 "unknown": "email-risky"}
 
@@ -202,8 +204,13 @@ async def process_verification_jobs(pool, settings: Settings, client, slack=None
         try:
             raw = await client.get_batch(job["data"]["batch_id"])
             if raw is None:  # still processing — poll again later
+                attempts = job["data"].get("attempts", 0) + 1
                 await complete_job(pool, job["id"])
-                await enqueue(pool, "verify_poll", job["data"],
+                if attempts >= MAX_POLL_ATTEMPTS:
+                    log.error("verify batch %s never completed after %s polls — "
+                              "abandoned", job["data"]["batch_id"], attempts)
+                    continue
+                await enqueue(pool, "verify_poll", {**job["data"], "attempts": attempts},
                               start_after_seconds=POLL_DELAY_SECONDS)
                 continue
             results = [(r["email"], *map_result(r)) for r in raw]
