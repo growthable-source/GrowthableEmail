@@ -148,7 +148,7 @@ async def test_process_bot_turns_drains_queue(pool):
 
 
 VALID_DOC = ("<!DOCTYPE html><html><body><h1>Hi {{first_name}}</h1>"
-             "<p>Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · "
+             "<p>Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US · "
              '<a href="{{unsubscribe_url}}">Unsubscribe</a></p></body></html>')
 
 

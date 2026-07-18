@@ -172,7 +172,7 @@ File: `email-assets/templates/newsletter.html`. Weekly/monthly digest. Also the 
     <!-- Footer -->
     <tr><td style="padding:32px 8px 0 8px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
+        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US · +1 910-839-7618 · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
         <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0;">
           <a href="https://growthable.io" style="color:#8894A0; text-decoration:underline;">growthable.io</a> &nbsp;·&nbsp; <a href="{{unsubscribe_url}}" style="color:#8894A0; text-decoration:underline;">Unsubscribe</a> &nbsp;·&nbsp; <a href="{{preferences_url}}" style="color:#8894A0; text-decoration:underline;">Email preferences</a>
         </td></tr>
@@ -270,7 +270,7 @@ File: `email-assets/templates/product-announcement.html`. New feature/product la
     <!-- Footer -->
     <tr><td style="padding:32px 8px 0 8px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
+        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US · +1 910-839-7618 · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
         <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0;">
           <a href="https://growthable.io" style="color:#8894A0; text-decoration:underline;">growthable.io</a> &nbsp;·&nbsp; <a href="{{unsubscribe_url}}" style="color:#8894A0; text-decoration:underline;">Unsubscribe</a> &nbsp;·&nbsp; <a href="{{preferences_url}}" style="color:#8894A0; text-decoration:underline;">Email preferences</a>
         </td></tr>
@@ -363,7 +363,7 @@ File: `email-assets/templates/promo-offer.html`. The only template with a navy h
     <!-- Footer -->
     <tr><td style="padding:32px 8px 0 8px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
+        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US · +1 910-839-7618 · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
         <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0;">
           <a href="https://growthable.io" style="color:#8894A0; text-decoration:underline;">growthable.io</a> &nbsp;·&nbsp; <a href="{{unsubscribe_url}}" style="color:#8894A0; text-decoration:underline;">Unsubscribe</a> &nbsp;·&nbsp; <a href="{{preferences_url}}" style="color:#8894A0; text-decoration:underline;">Email preferences</a>
         </td></tr>
@@ -488,7 +488,7 @@ File: `email-assets/templates/onboarding-welcome.html`. Welcome + step sequences
     <!-- Footer -->
     <tr><td style="padding:32px 8px 0 8px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
+        <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0; padding-bottom:8px;">Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US · +1 910-839-7618 · Whitelabel support, onboarding &amp; training for GoHighLevel agencies</td></tr>
         <tr><td align="center" style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif; font-size:13px; line-height:20px; color:#8894A0;">
           <a href="https://growthable.io" style="color:#8894A0; text-decoration:underline;">growthable.io</a> &nbsp;·&nbsp; <a href="{{unsubscribe_url}}" style="color:#8894A0; text-decoration:underline;">Unsubscribe</a> &nbsp;·&nbsp; <a href="{{preferences_url}}" style="color:#8894A0; text-decoration:underline;">Email preferences</a>
         </td></tr>

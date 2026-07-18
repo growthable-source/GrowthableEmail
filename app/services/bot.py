@@ -34,7 +34,7 @@ Workflow you must follow, in order:
    - Personalization: {{first_name}} (fallback "there") is substituted per recipient.
    - {{unsubscribe_url}} and {{preferences_url}} are substituted automatically per
      recipient and MUST appear in the footer, along with the postal address line
-     'Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia'. Campaigns
+     'Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US'. Campaigns
      missing either are rejected by the tools.
    - Only reference images that actually exist: the three brand asset URLs in the
      guide, YouTube thumbnails (https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg
@@ -85,7 +85,7 @@ Rules:
 
 BRAND_GUIDE = (Path(__file__).parent / "brand_guide.md").read_text()
 
-REQUIRED_ADDRESS_MARKER = "Woonona"
+REQUIRED_ADDRESS_MARKER = "Boulder"
 
 
 def validate_custom_html(content: dict) -> str | None:
@@ -97,7 +97,7 @@ def validate_custom_html(content: dict) -> str | None:
         return "html_body must include {{unsubscribe_url}} in the footer"
     if REQUIRED_ADDRESS_MARKER not in html:
         return ("footer must include the postal address line: "
-                "Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia")
+                "Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US")
     return None
 
 

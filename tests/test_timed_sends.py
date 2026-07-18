@@ -14,7 +14,7 @@ from tests.helpers import make_settings, verify_all_contacts
 RESEND_API = "https://api.resend.com/emails"
 
 HTML_BODY = ("<!DOCTYPE html><html><body><p>Hi {{first_name}},</p>"
-             "<a href='{{unsubscribe_url}}'>Unsubscribe</a> · Woonona"
+             "<a href='{{unsubscribe_url}}'>Unsubscribe</a> · Boulder"
              "</body></html>")
 
 

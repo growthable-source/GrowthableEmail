@@ -12,7 +12,7 @@ API = "https://api.resend.com"
 
 HTML_BODY = ("<!DOCTYPE html><html><body><p>Hi {{first_name}},</p>"
              "<p>Big news.</p>"
-             "<a href='{{unsubscribe_url}}'>Unsubscribe</a> · Woonona"
+             "<a href='{{unsubscribe_url}}'>Unsubscribe</a> · Boulder"
              "</body></html>")
 
 
