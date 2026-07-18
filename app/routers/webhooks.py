@@ -8,7 +8,7 @@ from svix.webhooks import Webhook, WebhookVerificationError
 
 from app.services.jobs import enqueue
 from app.services.suppressions import add_suppression, is_suppressed, normalize
-from app.services.verification import upsert_verdicts
+from app.services.verification import request_verification, upsert_verdicts
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -152,6 +152,9 @@ async def ghl_enroll(request: Request, body: EnrollIn):
     await pool.execute(
         "update campaigns set status='dispatching' where id=$1 and status in ('draft','ready')",
         campaign["id"])
+    # dispatch only claims verified-valid sends — kick off verification so this
+    # enrollment doesn't sit queued forever (auto-runs under the approval threshold)
+    await request_verification(pool, request.app.state.settings, campaign["id"])
     return {"enrolled": True}
 
 

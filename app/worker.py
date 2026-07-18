@@ -12,7 +12,8 @@ from app.services.daily_report import maybe_post_daily_reports
 from app.services.dispatch import (ensure_timed_queues, process_send_queue,
                                    promote_scheduled, requeue_stale)
 from app.services.ghl import GHLClient
-from app.services.guardrails import check_and_pause
+from app.services.guardrails import (check_and_pause, ensure_auto_resume,
+                                     process_auto_resume)
 from app.services.jobs import requeue_stale_jobs
 from app.services.notify import notify_campaign_going_out, notify_post_going_out
 from app.services.resend_client import ResendClient
@@ -60,6 +61,11 @@ async def run_forever() -> None:
             breached = await check_and_pause(pool, settings.alert_webhook_url,
                                              slack=slack,
                                              channel=settings.slack_channel_id)
+            # circuit breaker: paused campaigns schedule their own comeback and
+            # resume unattended once the daily counters reset
+            await ensure_auto_resume(pool)
+            if not breached:
+                await process_auto_resume(pool, slack)
             # humans first: a deep writeback/verification backlog must never leave
             # a Slack message unanswered for half an hour (2026-07-18 incident)
             if engines:

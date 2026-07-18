@@ -185,3 +185,23 @@ async def test_custom_missing_unsub_token_never_sends(pool):
     sent = await process_send_queue(pool, make_settings(),
                                     ResendClient("re", rps=10_000, backoff_base=0))
     assert sent == 0 and not route.called  # compliance backstop: nothing goes out
+
+
+@respx.mock
+async def test_claim_skips_sends_without_valid_verdict(pool):
+    """Last-gate check: even rows already IN the queue don't send without a
+    current valid verdict (revived stale queues, post-queue bounces)."""
+    route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em"}))
+    cid = await seed_campaign(pool, n_contacts=2, status="dispatching")
+    await pool.execute(
+        "insert into sends (campaign_id, ghl_contact_id, email) values "
+        "($1, 'c0', 'user0@x.co'), ($1, 'c1', 'user1@x.co')", cid)
+    # user1's verdict flips to invalid AFTER queueing (e.g. bounced elsewhere)
+    await pool.execute(
+        "update email_verifications set verdict='invalid' where email='user1@x.co'")
+    sent = await process_send_queue(pool, make_settings(),
+                                    ResendClient("re", rps=10_000, backoff_base=0))
+    assert sent == 1
+    assert route.calls.call_count == 1
+    assert (await pool.fetchval(
+        "select status from sends where email='user1@x.co'")) == "queued"  # never claimed

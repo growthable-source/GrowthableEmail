@@ -17,6 +17,19 @@ HISTORY_LIMIT = 40
 MAX_JOBS_PER_PASS = 10
 
 
+def cache_marked(messages: list) -> list:
+    """Copy of `messages` with a cache breakpoint on the final content block, so each
+    request extends the previous one's cached prefix (prompt caching is prefix-match;
+    the marker must sit on the newest content). The originals stay unmarked — markers
+    must not be persisted or they'd burn breakpoints on stale positions."""
+    last = messages[-1]
+    content = last["content"]
+    blocks = ([{"type": "text", "text": content}] if isinstance(content, str)
+              else [dict(b) for b in content])
+    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    return messages[:-1] + [{**last, "content": blocks}]
+
+
 def sanitize_history(messages: list) -> list:
     """Make a (possibly truncated) history valid for the API: it must open with a
     plain user text message. A blind tail slice can start mid assistant-turn or
@@ -42,9 +55,11 @@ class BaseBot:
         self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     def _system(self) -> str:
-        now = datetime.now(ZoneInfo(self._settings.bot_timezone))
-        return (f"{self.system_prompt}\n\nCurrent time: {now.isoformat()} "
-                f"({self._settings.bot_timezone}).")
+        # Must stay byte-identical across requests: it heads the cached prefix, and any
+        # variation (a timestamp, a per-request id) invalidates the prompt cache. The
+        # current time travels in each user message instead — see handle_turn.
+        return (f"{self.system_prompt}\n\nYour timezone is {self._settings.bot_timezone}. "
+                f"Each user message is prefixed with the current time in brackets.")
 
     async def _run_tool(self, name: str, args: dict):
         raise NotImplementedError
@@ -55,7 +70,10 @@ class BaseBot:
             "select messages from bot_sessions where thread_ts=$1", thread_ts)
         # sanitize on load too: repairs sessions persisted by older builds
         messages = sanitize_history(json.loads(row["messages"])) if row else []
-        messages.append({"role": "user", "content": f"<@{data['user']}>: {data['text']}"})
+        now = datetime.now(ZoneInfo(self._settings.bot_timezone))
+        messages.append({"role": "user",
+                         "content": f"[{now.isoformat(timespec='seconds')}] "
+                                    f"<@{data['user']}>: {data['text']}"})
         self._turn_context = {"channel": channel, "thread_ts": thread_ts}
 
         # session row must exist before tools (they may link rows to it)
@@ -68,7 +86,15 @@ class BaseBot:
                 response = await self._client.messages.create(
                     model=MODEL, max_tokens=16000,
                     thinking={"type": "adaptive"},
-                    system=self._system(), tools=self.tools, messages=messages)
+                    # tools render before system, so this one breakpoint caches both
+                    system=[{"type": "text", "text": self._system(),
+                             "cache_control": {"type": "ephemeral"}}],
+                    tools=self.tools, messages=cache_marked(messages))
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    log.debug("claude usage: input=%s cache_read=%s cache_write=%s",
+                              usage.input_tokens, usage.cache_read_input_tokens,
+                              usage.cache_creation_input_tokens)
                 messages.append({"role": "assistant",
                                  "content": [b.model_dump(mode="json")
                                              for b in response.content]})

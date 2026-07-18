@@ -205,12 +205,18 @@ def build_headers(settings: Settings, unsub_url: str) -> dict:
 
 
 async def _claim_batch(pool, campaign_id, limit: int) -> list[dict]:
+    # Last-gate verification check (like the suppression re-check): a queued row
+    # without a CURRENT valid verdict is never claimed, no matter how it got into
+    # the queue — revived stale queues, pre-verification enrollments, addresses
+    # that bounced since queueing. The queue's history can't override this.
     rows = await pool.fetch(
         """update sends set status='sending', next_attempt_at=now()
            where id in (
                select s.id from sends s
                where s.campaign_id = $2
                  and s.status='queued' and s.next_attempt_at <= now()
+                 and exists (select 1 from email_verifications v
+                             where v.email = s.email and v.verdict = 'valid')
                order by s.next_attempt_at, s.created_at
                limit $1
                for update of s skip locked)
