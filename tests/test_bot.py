@@ -211,3 +211,63 @@ async def test_segment_progress_reports_job_states(pool):
     await engine.handle_turn(TURN)
     result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
     assert result == {"created": 1}
+
+
+async def test_propose_send_blocked_until_verified(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, seed_tested_at) "
+        "values ('July', 'Big', 'newsletter', 'v1', now()) returning id")
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('c1', 'u@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c1')", cid)
+    engine, slack = make_engine(pool, [
+        [tool_block("propose_send", {"campaign_id": str(cid)})],
+        [text_block("Verification still pending.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "unverified" in result["error"]
+    assert all(p["blocks"] is None for p in slack.posts)  # no approval buttons posted
+
+
+async def test_propose_send_audience_counts_only_verified_valid(pool):
+    from app.services.verification import upsert_verdicts
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, seed_tested_at) "
+        "values ('July', 'Big', 'newsletter', 'v1', now()) returning id")
+    for i, verdict in enumerate(["valid", "risky"]):
+        await pool.execute(
+            "insert into contacts_cache (ghl_contact_id, email) values ($1, $2)",
+            f"c{i}", f"u{i}@x.co")
+        await pool.execute(
+            "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, $2)",
+            cid, f"c{i}")
+        await upsert_verdicts(pool, [(f"u{i}@x.co", verdict, "x")])
+    engine, slack = make_engine(pool, [
+        [tool_block("propose_send", {"campaign_id": str(cid)})],
+        [text_block("Awaiting approval.")],
+    ])
+    await engine.handle_turn(TURN)
+    buttons = next(p for p in slack.posts if p["blocks"])
+    # both contacts verified (no gate error), but only the valid one is counted
+    assert "*Audience:* 1 contacts" in buttons["blocks"][0]["text"]["text"]
+
+
+async def test_verification_status_tool(pool):
+    from app.services.verification import upsert_verdicts
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version) "
+        "values ('July', 'Big', 'newsletter', 'v1') returning id")
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('c1', 'u@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c1')", cid)
+    await upsert_verdicts(pool, [("u@x.co", "valid", "ok")])
+    engine, slack = make_engine(pool, [
+        [tool_block("verification_status", {"campaign_id": str(cid)})],
+        [text_block("All verified.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert result == {"valid": 1, "unverified": 0}

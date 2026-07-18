@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from app.services.dispatch import send_seed
 from app.services.jobs import enqueue
 from app.services.reports import campaign_report
 from app.services.resend_client import ResendClient
+from app.services.verification import (request_verification, unverified_count,
+                                       verification_summary)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +50,10 @@ Workflow you must follow, in order:
    iterate on the design with update_campaign (which requires a fresh seed test).
 3. create_campaign, then sync_audience and report the audience size AND the country
    breakdown it returns (plus how many contacts have an explicit timezone).
+   sync_audience also starts deliverability verification (Emailable) and returns its
+   status — report it. Large audiences need a human to click Verify (paid, cost gate).
+   Only verified-valid emails are ever sent to; propose_send stays blocked until every
+   audience email has a fresh verdict (check verification_status for progress).
 4. send_seed_test and tell the user to check their inbox.
 5. Only after the user confirms the seed email looks good: propose_send. Ask two things:
    - WHEN it should go out (immediately or a scheduled time).
@@ -146,6 +153,11 @@ TOOLS = [
           ["days", "tag"]),
     _tool("segment_progress",
           "Counts of pending/completed background tagging jobs.", {}, []),
+    _tool("verification_status",
+          "Deliverability-verification progress for the campaign audience: counts by "
+          "verdict (valid/invalid/risky/unknown) plus how many emails still lack a "
+          "fresh verdict.",
+          {"campaign_id": {"type": "string"}}, ["campaign_id"]),
     _tool("propose_send",
           "Post the approval buttons for dispatch. Requires a prior successful seed test. "
           "when_iso: ISO-8601 datetime with timezone offset, omit to send immediately. "
@@ -182,6 +194,22 @@ def approval_blocks(campaign_id: str, name: str, subject: str, audience: int,
              "text": {"type": "plain_text", "text": "Send"}, "value": value},
             {"type": "button", "style": "danger", "action_id": "cancel_send",
              "text": {"type": "plain_text", "text": "Cancel"}, "value": value},
+        ]},
+    ]
+
+
+def verify_approval_blocks(campaign_id: str, count: int, est_cost: float) -> list:
+    value = json.dumps({"campaign_id": campaign_id, "count": count})
+    summary = (f"*Verification needed:* {count} audience emails have no fresh "
+               f"deliverability verdict.\nEstimated cost: *${est_cost:.2f}* "
+               f"(Emailable). Sends stay blocked until the audience is verified.")
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
+        {"type": "actions", "elements": [
+            {"type": "button", "style": "primary", "action_id": "approve_verify",
+             "text": {"type": "plain_text", "text": "Verify"}, "value": value},
+            {"type": "button", "style": "danger", "action_id": "cancel_verify",
+             "text": {"type": "plain_text", "text": "Not now"}, "value": value},
         ]},
     ]
 
@@ -245,7 +273,20 @@ class BotEngine(BaseBot):
                     args["campaign_id"], json.dumps(args["content"]))
             return {"updated": True, "note": "content change resets the seed-test requirement"}
         if name == "sync_audience":
-            return await sync_audience(pool, self._ghl, args["campaign_id"])
+            result = await sync_audience(pool, self._ghl, args["campaign_id"])
+            verification = await request_verification(
+                pool, self._settings, uuid.UUID(args["campaign_id"]))
+            if verification["status"] == "needs_approval":
+                await self._slack.post_message(
+                    self._turn_context["channel"],
+                    text="Verification approval needed",
+                    blocks=verify_approval_blocks(
+                        args["campaign_id"], verification["unverified"],
+                        verification["est_cost"]),
+                    thread_ts=self._turn_context["thread_ts"])
+                verification["note"] = ("approval buttons posted; a human must click "
+                                        "Verify before this audience can be checked")
+            return {**result, "verification": verification}
         if name == "send_seed_test":
             campaign = await pool.fetchrow(
                 "select * from campaigns where id=$1::uuid", args["campaign_id"])
@@ -284,6 +325,9 @@ class BotEngine(BaseBot):
                 "select state, count(*) as n from jobs where name='ghl_writeback' "
                 "group by state")
             return {r["state"]: r["n"] for r in rows} or {"idle": True}
+        if name == "verification_status":
+            return await verification_summary(
+                pool, uuid.UUID(args["campaign_id"]), self._settings.verdict_ttl_days)
         if name == "propose_send":
             campaign = await pool.fetchrow(
                 "select * from campaigns where id=$1::uuid", args["campaign_id"])
@@ -292,8 +336,24 @@ class BotEngine(BaseBot):
             if campaign["seed_tested_at"] is None:
                 return {"error": "seed test required before sending — call send_seed_test "
                                  "and have the user check the email first"}
+            unverified = await unverified_count(
+                pool, campaign["id"], self._settings.verdict_ttl_days)
+            if unverified:
+                return {"error": f"{unverified} audience emails are unverified — "
+                                 "verification must finish before sending (check "
+                                 "verification_status; run sync_audience if it never "
+                                 "started)"}
+            # count only who will actually receive it: verified-valid, not
+            # suppressed, not dnd — the same filter every send path applies
             audience = await pool.fetchval(
-                "select count(*) from campaign_contacts where campaign_id=$1", campaign["id"])
+                """select count(*) from campaign_contacts cc
+                   join contacts_cache c using (ghl_contact_id)
+                   where cc.campaign_id = $1 and c.dnd = false
+                     and not exists (select 1 from suppressions s where s.email = c.email)
+                     and exists (select 1 from email_verifications v
+                                 where v.email = c.email and v.verdict = 'valid'
+                                   and v.verified_at > now() - make_interval(days => $2))""",
+                campaign["id"], self._settings.verdict_ttl_days)
             blocks = approval_blocks(str(campaign["id"]), campaign["name"],
                                      campaign["subject"], audience, args.get("when_iso"),
                                      args.get("per_day"), args.get("per_hour"))

@@ -204,3 +204,29 @@ async def test_cancel_post_and_stale_click(client, pool):
     assert (await pool.fetchval("select status from social_posts")) == "cancelled"
     await post_interaction(client, "approve_post", {"post_id": str(post_id), "when": None})
     assert b"already" in update.calls[1].request.read().lower()
+
+
+@respx.mock
+async def test_approve_verify_enqueues_submit(client, pool):
+    update = respx.post(f"{SLACK_API}/chat.update").mock(
+        return_value=httpx.Response(200, json={"ok": True}))
+    cid = await seed_ready_campaign(pool)
+    resp = await post_interaction(client, "approve_verify",
+                                  {"campaign_id": str(cid), "count": 5})
+    assert resp.status_code == 200
+    job = await pool.fetchrow("select data from jobs where name='verify_submit'")
+    assert json.loads(job["data"])["campaign_id"] == str(cid)
+    body = update.calls[0].request.read()
+    assert b"approved" in body and b"5" in body
+
+
+@respx.mock
+async def test_cancel_verify_enqueues_nothing(client, pool):
+    update = respx.post(f"{SLACK_API}/chat.update").mock(
+        return_value=httpx.Response(200, json={"ok": True}))
+    cid = await seed_ready_campaign(pool)
+    resp = await post_interaction(client, "cancel_verify",
+                                  {"campaign_id": str(cid), "count": 5})
+    assert resp.status_code == 200
+    assert (await pool.fetchval("select count(*) from jobs where name='verify_submit'")) == 0
+    assert b"declined" in update.calls[0].request.read()

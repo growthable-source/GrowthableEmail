@@ -94,6 +94,21 @@ async def slack_interactions(request: Request):
         return await _handle_post_action(pool, settings, slack, action, value,
                                          channel, message_ts, user)
 
+    if action["action_id"] in ("approve_verify", "cancel_verify"):
+        if action["action_id"] == "cancel_verify":
+            await slack.update_message(
+                channel, message_ts,
+                text=f"❌ Verification declined by <@{user}> — sends stay blocked "
+                     "until the audience is verified.")
+        else:
+            await enqueue(pool, "verify_submit",
+                          {"campaign_id": value["campaign_id"]})
+            await slack.update_message(
+                channel, message_ts,
+                text=f"✅ Verification approved by <@{user}> — {value['count']} "
+                     "emails submitted; I'll have verdicts shortly.")
+        return Response(status_code=200)
+
     campaign_id = uuid.UUID(value["campaign_id"])
     campaign = await pool.fetchrow("select status from campaigns where id=$1", campaign_id)
     if campaign is None:
