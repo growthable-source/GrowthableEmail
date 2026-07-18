@@ -172,6 +172,17 @@ async def process_verification_jobs(pool, settings: Settings, client, slack=None
     counts real failures, not long batches)."""
     done = 0
     while (job := await fetch_job(pool, "verify_submit")) is not None:
+        # In-flight guard: while ANY batches are still out with the provider, defer —
+        # their emails have no verdict rows yet, so submitting now would re-bill the
+        # same addresses (double Verify clicks, overlapping campaigns).
+        in_flight = await pool.fetchval(
+            "select count(*) from jobs where name='verify_poll' "
+            "and state in ('created', 'active')")
+        if in_flight:
+            await complete_job(pool, job["id"])
+            await enqueue(pool, "verify_submit", job["data"],
+                          start_after_seconds=POLL_DELAY_SECONDS * 2)
+            continue
         try:
             emails = await unverified_emails(pool, job["data"]["campaign_id"])
             for chunk in _chunks(emails, BATCH_CHUNK):

@@ -266,3 +266,23 @@ async def test_missing_verifier_warns_once_in_campaign_thread(pool):
     assert len(warnings) == 1
     assert warnings[0]["channel"] == "C0TEST" and warnings[0]["thread_ts"] == "100.1"
     verification._warned_unconfigured = False
+
+
+async def test_submit_defers_while_batches_in_flight(pool):
+    """Double Verify click / overlapping campaigns must never re-bill the same
+    emails: a submit waits until no batches are out with the provider."""
+    cid_a = await seed_campaign(pool, ["a@x.com"])
+    cid_b = await seed_campaign(pool, ["a@x.com", "b@x.com"])  # overlapping audience
+    settings, client = make_settings(), FakeVerifyClient()
+    await request_verification(pool, settings, cid_a)
+    await request_verification(pool, settings, cid_b)
+    # pass 1: first submit creates a batch; second submit must defer, not submit
+    await pool.execute("update jobs set start_after=now() "
+                       "where name in ('verify_submit', 'verify_poll') and state='created'")
+    await process_verification_jobs(pool, settings, client)
+    assert len(client.batches) == 1  # only campaign A's batch went out
+    # drain: poll completes, verdicts land, deferred submit runs on the remainder
+    await drain_verification(pool, settings, client)
+    all_emails = [e for b in client.batches.values() for e in b]
+    assert sorted(all_emails) == ["a@x.com", "b@x.com"]  # a@x.com billed exactly once
+    assert await unverified_count(pool, cid_b) == 0
