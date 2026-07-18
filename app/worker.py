@@ -18,6 +18,8 @@ from app.services.notify import notify_campaign_going_out, notify_post_going_out
 from app.services.resend_client import ResendClient
 from app.services.slack_client import SlackClient
 from app.services.social_dispatch import notify_due_social_posts
+from app.services.verification import process_verification_jobs
+from app.services.verify_client import EmailableClient
 from app.services.writeback import process_writeback_jobs
 
 log = logging.getLogger("worker")
@@ -30,6 +32,8 @@ async def run_forever() -> None:
     pool = await create_pool(settings.database_url)
     ghl = GHLClient(settings.ghl_pi_token, settings.ghl_location_id)
     resend = ResendClient(settings.resend_api_key, rps=settings.send_rps)
+    verifier = (EmailableClient(settings.emailable_api_key)
+                if settings.emailable_api_key else None)
     slack = SlackClient(settings.slack_bot_token) if settings.slack_enabled else None
     engines: dict = {}
     if slack is not None:
@@ -54,6 +58,8 @@ async def run_forever() -> None:
                     await notify_post_going_out(pool, slack, post_id)
             breached = await check_and_pause(pool, settings.alert_webhook_url)
             await process_writeback_jobs(pool, ghl)
+            if verifier is not None:
+                await process_verification_jobs(pool, settings, verifier)
             await maybe_post_daily_reports(pool, slack, settings)
             if engines:
                 await process_bot_turns(pool, engines)
