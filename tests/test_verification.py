@@ -326,3 +326,24 @@ async def test_provider_result_never_downgrades_valid(pool):
     await upsert_verdicts(pool, [("a@x.com", "invalid", "bounced")], provider="resend")
     assert await pool.fetchval(
         "select verdict from email_verifications where email='a@x.com'") == "invalid"
+
+
+async def test_late_duplicate_batch_does_not_reannounce_completion(pool):
+    from app.services.jobs import enqueue
+    cid = await seed_campaign(pool, ["a@x.com"])
+    await pool.execute(
+        "update campaigns set channel='C0TEST', thread_ts='100.1' where id=$1", cid)
+    settings, slack = make_settings(), FakeSlack()
+    client = FakeVerifyClient()
+    await request_verification(pool, settings, cid)
+    for _ in range(4):
+        await pool.execute("update jobs set start_after=now() "
+                           "where name in ('verify_submit', 'verify_poll') and state='created'")
+        await process_verification_jobs(pool, settings, client, slack=slack)
+    assert sum("✅" in p["text"] for p in slack.posts) == 1
+    # a duplicate batch reports the same email again after completion
+    dup_batch = await client.create_batch(["a@x.com"])
+    await enqueue(pool, "verify_poll", {"batch_id": dup_batch, "campaign_id": str(cid)})
+    await pool.execute("update jobs set start_after=now() where state='created'")
+    await process_verification_jobs(pool, settings, client, slack=slack)
+    assert sum("✅" in p["text"] for p in slack.posts) == 1  # still exactly one

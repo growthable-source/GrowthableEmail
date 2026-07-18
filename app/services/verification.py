@@ -121,6 +121,8 @@ async def _notify_progress(pool, slack, campaign_id, before_remaining: int,
     if not total:
         return
     if after_remaining == 0:
+        if before_remaining == 0:
+            return  # late/duplicate batch — completion was already announced
         s = await verification_summary(pool, campaign_id)
         valid = s.get("valid", 0)
         invalid = s.get("invalid", 0)
