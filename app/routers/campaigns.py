@@ -77,8 +77,7 @@ async def dispatch_campaign(request: Request, campaign_id: str):
     campaign = await _get_campaign(request, campaign_id)
     if campaign["status"] == "paused":
         raise HTTPException(409, "campaign is paused by guardrails")
-    queued = await enqueue_campaign_sends(
-        request.app.state.pool, request.app.state.settings, campaign["id"])
+    queued = await enqueue_campaign_sends(request.app.state.pool, campaign["id"])
     return {"queued": queued}
 
 

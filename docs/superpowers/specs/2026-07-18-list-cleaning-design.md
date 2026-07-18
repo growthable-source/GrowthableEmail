@@ -2,6 +2,13 @@
 
 **Date:** 2026-07-18
 **Status:** Approved by Ryan (brainstorming session)
+
+> **Amendment (2026-07-18, post-implementation):** the 90-day TTL described below
+> was REMOVED at Ryan's direction — verdicts are permanent and each email is billed
+> to the provider at most once, ever. Send paths require `verdict='valid'` with no
+> freshness condition; `VERDICT_TTL_DAYS` no longer exists. List decay is covered by
+> the bounce-feedback upsert (valid → invalid on hard bounce) and the guardrail.
+> To force a re-check of an address, delete its `email_verifications` row.
 **Trigger:** Campaign "A lot has changed at Growthable" was auto-paused by the
 guardrail kill rule on 2026-07-17/18 — 22 bounces on 221 sends (~10%, limit 3%).
 The 47.7k GHL list has never been mailbox-verified; `sync_audience` only drops

@@ -40,19 +40,31 @@ async def seed_campaign(pool, emails):
     return cid
 
 
-async def test_unverified_count_ignores_fresh_valid(pool):
+async def test_unverified_count_ignores_known_emails(pool):
     cid = await seed_campaign(pool, ["a@x.com", "b@x.com"])
     await upsert_verdicts(pool, [("a@x.com", "valid", "accepted_email")])
-    assert await unverified_count(pool, cid, 90) == 1
-    assert await unverified_emails(pool, cid, 90) == ["b@x.com"]
+    assert await unverified_count(pool, cid) == 1
+    assert await unverified_emails(pool, cid) == ["b@x.com"]
 
 
-async def test_stale_verdict_counts_as_unverified(pool):
+async def test_verdicts_are_permanent_never_reverified(pool):
+    """Ryan's rule: once verified, never pay to check the same email again."""
+    cid = await seed_campaign(pool, ["a@x.com", "b@x.com"])
+    await upsert_verdicts(pool, [("a@x.com", "valid", "ok"),
+                                 ("b@x.com", "invalid", "rejected_email")])
+    await pool.execute(
+        "update email_verifications set verified_at = now() - interval '2 years'")
+    assert await unverified_count(pool, cid) == 0
+    assert (await request_verification(pool, make_settings(), cid))["status"] == "verified"
+
+
+async def test_old_valid_verdict_still_sends(pool):
+    from app.services.dispatch import enqueue_campaign_sends
     cid = await seed_campaign(pool, ["a@x.com"])
     await upsert_verdicts(pool, [("a@x.com", "valid", "ok")])
     await pool.execute(
-        "update email_verifications set verified_at = now() - interval '91 days'")
-    assert await unverified_count(pool, cid, 90) == 1
+        "update email_verifications set verified_at = now() - interval '2 years'")
+    assert await enqueue_campaign_sends(pool, cid) == 1
 
 
 async def test_upsert_overwrites(pool):
@@ -91,7 +103,7 @@ async def test_verification_summary(pool):
     cid = await seed_campaign(pool, ["a@x.com", "b@x.com", "c@x.com"])
     await upsert_verdicts(pool, [("a@x.com", "valid", "ok"),
                                  ("b@x.com", "invalid", "rejected_email")])
-    summary = await verification_summary(pool, cid, 90)
+    summary = await verification_summary(pool, cid)
     assert summary == {"valid": 1, "invalid": 1, "unverified": 1}
 
 
@@ -128,7 +140,7 @@ async def test_pipeline_verifies_and_tags(pool):
         "select ghl_contact_id from contacts_cache where email='role@x.com'")
     assert (dead_gid, "email-invalid") in tags
     assert (role_gid, "email-risky") in tags
-    assert await unverified_count(pool, cid, 90) == 0
+    assert await unverified_count(pool, cid) == 0
 
 
 async def test_pending_batch_reenqueues_poll(pool):
@@ -151,7 +163,7 @@ async def test_queue_path_excludes_unverified_and_nonvalid(pool):
     cid = await seed_campaign(pool, ["good@x.com", "risky@x.com", "novote@x.com"])
     await upsert_verdicts(pool, [("good@x.com", "valid", "ok"),
                                  ("risky@x.com", "risky", "role")])
-    queued = await enqueue_campaign_sends(pool, make_settings(), cid)
+    queued = await enqueue_campaign_sends(pool, cid)
     assert queued == 1
     assert await pool.fetchval("select email from sends") == "good@x.com"
 
@@ -168,7 +180,7 @@ async def test_broadcast_audience_excludes_unverified(pool):
     from app.services.broadcast import _audience_csv
     cid = await seed_campaign(pool, ["good@x.com", "novote@x.com"])
     await upsert_verdicts(pool, [("good@x.com", "valid", "ok")])
-    csv_bytes, count = await _audience_csv(pool, cid, 90)
+    csv_bytes, count = await _audience_csv(pool, cid)
     assert count == 1 and b"good@x.com" in csv_bytes and b"novote" not in csv_bytes
 
 

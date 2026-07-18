@@ -1,6 +1,11 @@
 """Verdict-cache orchestration (spec: docs/superpowers/specs/2026-07-18-list-cleaning-design.md).
-Fail-safe by construction: an email with no fresh 'valid' verdict is excluded
-from every send path, so verification errors can only under-send, never over-send."""
+Fail-safe by construction: an email without a 'valid' verdict is excluded from
+every send path, so verification errors can only under-send, never over-send.
+
+Verdicts are PERMANENT — each email is billed to the provider at most once, ever
+(Ryan's rule, 2026-07-18). List decay is handled for free: hard bounces overwrite
+'valid' with 'invalid' via the Resend webhook, and the guardrail kill rule backstops
+anything that slips through. To force a re-check, delete the row."""
 import logging
 
 from app.config import Settings
@@ -20,21 +25,19 @@ _UNVERIFIED_SQL = """
     from campaign_contacts cc
     join contacts_cache c using (ghl_contact_id)
     where cc.campaign_id = $1
-      and not exists (select 1 from email_verifications v
-                      where v.email = c.email
-                        and v.verified_at > now() - make_interval(days => $2))
+      and not exists (select 1 from email_verifications v where v.email = c.email)
     order by c.email
 """
 
 
-async def unverified_emails(pool, campaign_id, ttl_days: int) -> list[str]:
-    """Audience emails with no verdict, or only a stale one (any verdict re-verifies
-    after TTL — a 91-day-old 'valid' is as untrustworthy as a missing one)."""
-    return [r["email"] for r in await pool.fetch(_UNVERIFIED_SQL, campaign_id, ttl_days)]
+async def unverified_emails(pool, campaign_id) -> list[str]:
+    """Audience emails we have never verified. Any existing verdict — however old —
+    means the email is never submitted to the provider again."""
+    return [r["email"] for r in await pool.fetch(_UNVERIFIED_SQL, campaign_id)]
 
 
-async def unverified_count(pool, campaign_id, ttl_days: int) -> int:
-    return len(await unverified_emails(pool, campaign_id, ttl_days))
+async def unverified_count(pool, campaign_id) -> int:
+    return len(await unverified_emails(pool, campaign_id))
 
 
 async def upsert_verdicts(pool, results: list[tuple], provider: str = "emailable") -> None:
@@ -51,7 +54,7 @@ async def request_verification(pool, settings: Settings, campaign_id) -> dict:
     """Kick off verification for a campaign's unverified audience. Auto-submits at or
     under the approval threshold; above it, the caller must post an approve button
     (spend gate) and the button handler enqueues verify_submit."""
-    count = await unverified_count(pool, campaign_id, settings.verdict_ttl_days)
+    count = await unverified_count(pool, campaign_id)
     if count == 0:
         return {"status": "verified"}
     est_cost = round(count * settings.verify_cost_per_email, 2)
@@ -61,18 +64,17 @@ async def request_verification(pool, settings: Settings, campaign_id) -> dict:
     return {"status": "submitted", "unverified": count, "est_cost": est_cost}
 
 
-async def verification_summary(pool, campaign_id, ttl_days: int) -> dict:
-    """Fresh-verdict counts for the campaign audience + how many still lack one."""
+async def verification_summary(pool, campaign_id) -> dict:
+    """Verdict counts for the campaign audience + how many still lack one."""
     rows = await pool.fetch(
         """select v.verdict, count(distinct c.email) as n
            from campaign_contacts cc
            join contacts_cache c using (ghl_contact_id)
            join email_verifications v on v.email = c.email
-                and v.verified_at > now() - make_interval(days => $2)
            where cc.campaign_id = $1
-           group by v.verdict""", campaign_id, ttl_days)
+           group by v.verdict""", campaign_id)
     summary = {r["verdict"]: r["n"] for r in rows}
-    summary["unverified"] = await unverified_count(pool, campaign_id, ttl_days)
+    summary["unverified"] = await unverified_count(pool, campaign_id)
     return summary
 
 
@@ -104,8 +106,7 @@ async def process_verification_jobs(pool, settings: Settings, client,
     done = 0
     while (job := await fetch_job(pool, "verify_submit")) is not None:
         try:
-            emails = await unverified_emails(
-                pool, job["data"]["campaign_id"], settings.verdict_ttl_days)
+            emails = await unverified_emails(pool, job["data"]["campaign_id"])
             for chunk in _chunks(emails, BATCH_CHUNK):
                 batch_id = await client.create_batch(chunk)
                 await enqueue(pool, "verify_poll", {"batch_id": batch_id},

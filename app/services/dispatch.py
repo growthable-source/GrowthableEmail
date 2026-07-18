@@ -20,7 +20,7 @@ RETRY_BASE_SECONDS = 120
 WINDOW_HOURS = 8  # timed sends missed by more than this roll to the next day's window
 
 
-async def enqueue_campaign_sends(pool, settings: Settings, campaign_id) -> int:
+async def enqueue_campaign_sends(pool, campaign_id) -> int:
     """Fill the send queue for a campaign. Idempotent; marks campaign dispatching."""
     inserted = await pool.fetchval(
         """with ins as (
@@ -32,12 +32,11 @@ async def enqueue_campaign_sends(pool, settings: Settings, campaign_id) -> int:
                  and c.dnd = false
                  and not exists (select 1 from suppressions s where s.email = c.email)
                  and exists (select 1 from email_verifications v
-                             where v.email = c.email and v.verdict = 'valid'
-                               and v.verified_at > now() - make_interval(days => $2))
+                             where v.email = c.email and v.verdict = 'valid')
                on conflict (campaign_id, ghl_contact_id) do nothing
                returning 1)
            select count(*) from ins""",
-        campaign_id, settings.verdict_ttl_days,
+        campaign_id,
     )
     await pool.execute(
         "update campaigns set status='dispatching' where id=$1 and status in ('draft','ready')",
@@ -57,9 +56,8 @@ async def enqueue_timed_sends(pool, settings: Settings, campaign_id) -> int:
              and c.dnd = false
              and not exists (select 1 from suppressions s where s.email = c.email)
              and exists (select 1 from email_verifications v
-                         where v.email = c.email and v.verdict = 'valid'
-                           and v.verified_at > now() - make_interval(days => $2))""",
-        campaign_id, settings.verdict_ttl_days,
+                         where v.email = c.email and v.verdict = 'valid')""",
+        campaign_id,
     )
     now = datetime.now(timezone.utc)
     records = []

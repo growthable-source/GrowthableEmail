@@ -178,7 +178,7 @@ async def test_broadcast_sends_do_not_count_against_daily_cap(pool):
     await pool.execute(
         "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'q1')", qid)
     await verify_all_contacts(pool)
-    await enqueue_campaign_sends(pool, make_settings(), qid)
+    await enqueue_campaign_sends(pool, qid)
     settings = make_settings(daily_send_cap=2)  # 2 broadcast sends already recorded today
     sent = await process_send_queue(pool, settings, make_resend())
     assert sent == 1

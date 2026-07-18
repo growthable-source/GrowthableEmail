@@ -30,7 +30,7 @@ UNSUB_TAG = "{{{RESEND_UNSUBSCRIBE_URL}}}"
 COLUMN_MAP = {"email": "email", "first_name": "first_name", "last_name": "last_name"}
 
 # Same drop rules as the queue path (spec §5): dnd + suppression re-check at dispatch,
-# plus a fresh verified-valid verdict ($2 = ttl days)
+# plus a verified-valid verdict
 AUDIENCE_SQL = """
     select cc.ghl_contact_id, c.email, c.first_name, c.last_name
     from campaign_contacts cc
@@ -39,8 +39,7 @@ AUDIENCE_SQL = """
       and c.dnd = false
       and not exists (select 1 from suppressions s where s.email = c.email)
       and exists (select 1 from email_verifications v
-                  where v.email = c.email and v.verdict = 'valid'
-                    and v.verified_at > now() - make_interval(days => $2))
+                  where v.email = c.email and v.verdict = 'valid')
 """
 
 
@@ -66,8 +65,8 @@ async def render_broadcast_html(campaign) -> str:
     return (await render_batch(campaign["template_ref"], [props]))[0].html
 
 
-async def _audience_csv(pool, campaign_id, ttl_days: int) -> tuple[bytes, int]:
-    rows = await pool.fetch(AUDIENCE_SQL, campaign_id, ttl_days)
+async def _audience_csv(pool, campaign_id) -> tuple[bytes, int]:
+    rows = await pool.fetch(AUDIENCE_SQL, campaign_id)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["email", "first_name", "last_name"])
@@ -86,10 +85,8 @@ async def _fail(pool, slack, campaign, reason: str) -> None:
             thread_ts=campaign["thread_ts"])
 
 
-async def _start_import(pool, settings: Settings, resend: ResendClient, slack,
-                        campaign) -> None:
-    csv_bytes, count = await _audience_csv(pool, campaign["id"],
-                                           settings.verdict_ttl_days)
+async def _start_import(pool, resend: ResendClient, slack, campaign) -> None:
+    csv_bytes, count = await _audience_csv(pool, campaign["id"])
     if count == 0:
         await _fail(pool, slack, campaign,
                     "audience is empty — run sync_audience (and finish "
@@ -142,12 +139,11 @@ async def _send_if_imported(pool, settings: Settings, resend: ResendClient,
                  and c.dnd = false
                  and not exists (select 1 from suppressions s where s.email = c.email)
                  and exists (select 1 from email_verifications v
-                             where v.email = c.email and v.verdict = 'valid'
-                               and v.verified_at > now() - make_interval(days => $2))
+                             where v.email = c.email and v.verdict = 'valid')
                on conflict (campaign_id, ghl_contact_id) do nothing
                returning 1)
            select count(*) from ins""",
-        campaign["id"], settings.verdict_ttl_days)
+        campaign["id"])
     log.info("broadcast %s created for campaign %s (%s recipients)",
              broadcast_id, campaign["id"], recipients)
     if slack is not None and campaign["channel"]:
@@ -167,7 +163,7 @@ async def process_broadcast_campaigns(pool, settings: Settings, resend: ResendCl
         "and status in ('scheduled', 'dispatching')")
     for campaign in to_import:
         try:
-            await _start_import(pool, settings, resend, slack, campaign)
+            await _start_import(pool, resend, slack, campaign)
         except HardSendError as exc:
             await _fail(pool, slack, campaign, f"audience import rejected: {exc}")
         except Exception:  # transient (network/5xx) — retry next tick

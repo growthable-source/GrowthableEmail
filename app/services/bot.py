@@ -52,8 +52,9 @@ Workflow you must follow, in order:
    breakdown it returns (plus how many contacts have an explicit timezone).
    sync_audience also starts deliverability verification (Emailable) and returns its
    status — report it. Large audiences need a human to click Verify (paid, cost gate).
+   Each email is verified at most once ever (verdicts are permanent, never re-billed).
    Only verified-valid emails are ever sent to; propose_send stays blocked until every
-   audience email has a fresh verdict (check verification_status for progress).
+   audience email has a verdict (check verification_status for progress).
 4. send_seed_test and tell the user to check their inbox.
 5. Only after the user confirms the seed email looks good: propose_send. Ask two things:
    - WHEN it should go out (immediately or a scheduled time).
@@ -326,8 +327,7 @@ class BotEngine(BaseBot):
                 "group by state")
             return {r["state"]: r["n"] for r in rows} or {"idle": True}
         if name == "verification_status":
-            return await verification_summary(
-                pool, uuid.UUID(args["campaign_id"]), self._settings.verdict_ttl_days)
+            return await verification_summary(pool, uuid.UUID(args["campaign_id"]))
         if name == "propose_send":
             campaign = await pool.fetchrow(
                 "select * from campaigns where id=$1::uuid", args["campaign_id"])
@@ -336,8 +336,7 @@ class BotEngine(BaseBot):
             if campaign["seed_tested_at"] is None:
                 return {"error": "seed test required before sending — call send_seed_test "
                                  "and have the user check the email first"}
-            unverified = await unverified_count(
-                pool, campaign["id"], self._settings.verdict_ttl_days)
+            unverified = await unverified_count(pool, campaign["id"])
             if unverified:
                 return {"error": f"{unverified} audience emails are unverified — "
                                  "verification must finish before sending (check "
@@ -351,9 +350,8 @@ class BotEngine(BaseBot):
                    where cc.campaign_id = $1 and c.dnd = false
                      and not exists (select 1 from suppressions s where s.email = c.email)
                      and exists (select 1 from email_verifications v
-                                 where v.email = c.email and v.verdict = 'valid'
-                                   and v.verified_at > now() - make_interval(days => $2))""",
-                campaign["id"], self._settings.verdict_ttl_days)
+                                 where v.email = c.email and v.verdict = 'valid')""",
+                campaign["id"])
             blocks = approval_blocks(str(campaign["id"]), campaign["name"],
                                      campaign["subject"], audience, args.get("when_iso"),
                                      args.get("per_day"), args.get("per_hour"))
