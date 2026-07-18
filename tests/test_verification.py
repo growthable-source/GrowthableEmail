@@ -250,3 +250,19 @@ async def test_provider_error_retries_job(pool):
     job = await pool.fetchrow(
         "select state, retry_count from jobs where name='verify_submit'")
     assert job["state"] == "created" and job["retry_count"] == 1
+
+
+async def test_missing_verifier_warns_once_in_campaign_thread(pool):
+    from app.services import verification
+    verification._warned_unconfigured = False
+    cid = await seed_campaign(pool, ["a@x.com"])
+    await pool.execute(
+        "update campaigns set channel='C0TEST', thread_ts='100.1' where id=$1", cid)
+    await request_verification(pool, make_settings(), cid)  # queues verify_submit
+    slack = FakeSlack()
+    await verification.warn_missing_verifier(pool, slack)
+    await verification.warn_missing_verifier(pool, slack)  # second tick: no repeat
+    warnings = [p for p in slack.posts if "EMAILABLE_API_KEY" in p["text"]]
+    assert len(warnings) == 1
+    assert warnings[0]["channel"] == "C0TEST" and warnings[0]["thread_ts"] == "100.1"
+    verification._warned_unconfigured = False

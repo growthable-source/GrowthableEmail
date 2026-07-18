@@ -18,7 +18,8 @@ from app.services.notify import notify_campaign_going_out, notify_post_going_out
 from app.services.resend_client import ResendClient
 from app.services.slack_client import SlackClient
 from app.services.social_dispatch import notify_due_social_posts
-from app.services.verification import process_verification_jobs
+from app.services.verification import (process_verification_jobs,
+                                       warn_missing_verifier)
 from app.services.verify_client import EmailableClient
 from app.services.writeback import process_writeback_jobs
 
@@ -62,6 +63,8 @@ async def run_forever() -> None:
             await process_writeback_jobs(pool, ghl)
             if verifier is not None:
                 await process_verification_jobs(pool, settings, verifier, slack=slack)
+            else:
+                await warn_missing_verifier(pool, slack)
             await maybe_post_daily_reports(pool, slack, settings)
             if engines:
                 await process_bot_turns(pool, engines)

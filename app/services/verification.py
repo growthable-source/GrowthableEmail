@@ -136,6 +136,35 @@ async def _notify_progress(pool, slack, campaign_id, before_remaining: int,
             thread_ts=campaign["thread_ts"])
 
 
+_warned_unconfigured = False
+
+
+async def warn_missing_verifier(pool, slack) -> None:
+    """Worker has no Emailable key but verification jobs are waiting — say so in the
+    campaign thread instead of silently skipping (once per worker process). Without
+    this, an approved verification just never happens and nobody is told."""
+    global _warned_unconfigured
+    if slack is None or _warned_unconfigured:
+        return
+    rows = await pool.fetch(
+        """select distinct c.channel, c.thread_ts from jobs j
+           join campaigns c on c.id = (j.data->>'campaign_id')::uuid
+           where j.name in ('verify_submit', 'verify_poll') and j.state = 'created'
+             and c.channel is not null""")
+    if not rows:
+        return
+    for r in rows:
+        await slack.post_message(
+            r["channel"],
+            text="⚠️ Verification is approved but I CANNOT run it: "
+                 "`EMAILABLE_API_KEY` is not set on the *worker* service "
+                 "(growthable-email-worker on Render). Add it there and the queued "
+                 "verification starts automatically — no need to re-approve.",
+            thread_ts=r["thread_ts"])
+    _warned_unconfigured = True
+    log.error("verification jobs pending but EMAILABLE_API_KEY is not configured")
+
+
 async def process_verification_jobs(pool, settings: Settings, client, slack=None,
                                     backoff_seconds: int = 60) -> int:
     """One worker pass: drain verify_submit and verify_poll jobs. A still-processing
