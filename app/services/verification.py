@@ -43,12 +43,17 @@ async def unverified_count(pool, campaign_id) -> int:
 
 
 async def upsert_verdicts(pool, results: list[tuple], provider: str = "emailable") -> None:
-    """results: [(email, verdict, reason)]. Last write wins; verified_at refreshes."""
+    """results: [(email, verdict, reason)]. A provider result never downgrades an
+    existing 'valid' (a duplicate/greylisted second probe must not destroy a
+    paid-for verdict); real-world bounce feedback (provider='resend') always wins."""
     await pool.executemany(
         """insert into email_verifications (email, verdict, reason, provider)
            values ($1, $2, $3, $4)
            on conflict (email) do update set verdict=excluded.verdict,
-               reason=excluded.reason, provider=excluded.provider, verified_at=now()""",
+               reason=excluded.reason, provider=excluded.provider, verified_at=now()
+           where excluded.provider = 'resend'
+              or excluded.verdict = 'valid'
+              or email_verifications.verdict <> 'valid'""",
         [(normalize(e), v, r, provider) for e, v, r in results])
 
 

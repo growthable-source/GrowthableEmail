@@ -67,9 +67,9 @@ async def test_old_valid_verdict_still_sends(pool):
     assert await enqueue_campaign_sends(pool, cid) == 1
 
 
-async def test_upsert_overwrites(pool):
+async def test_upsert_bounce_overwrites_valid(pool):
     await upsert_verdicts(pool, [("a@x.com", "valid", "ok")])
-    await upsert_verdicts(pool, [("a@x.com", "invalid", "bounced")])
+    await upsert_verdicts(pool, [("a@x.com", "invalid", "bounced")], provider="resend")
     row = await pool.fetchrow("select verdict, reason from email_verifications")
     assert (row["verdict"], row["reason"]) == ("invalid", "bounced")
 
@@ -309,3 +309,20 @@ async def test_stalled_batch_abandoned_after_max_polls(pool):
     assert await pool.fetchval(
         "select count(*) from jobs where name='verify_poll' "
         "and state in ('created', 'active')") == 0
+
+
+async def test_provider_result_never_downgrades_valid(pool):
+    await upsert_verdicts(pool, [("a@x.com", "valid", "accepted_email")])
+    # duplicate/greylisted second probe must not destroy the paid-for verdict
+    await upsert_verdicts(pool, [("a@x.com", "unknown", "timeout")])
+    await upsert_verdicts(pool, [("a@x.com", "risky", "low_deliverability")])
+    assert await pool.fetchval("select verdict from email_verifications") == "valid"
+    # upgrades still apply
+    await upsert_verdicts(pool, [("b@x.com", "risky", "role")])
+    await upsert_verdicts(pool, [("b@x.com", "valid", "accepted_email")])
+    assert await pool.fetchval(
+        "select verdict from email_verifications where email='b@x.com'") == "valid"
+    # a real bounce always wins
+    await upsert_verdicts(pool, [("a@x.com", "invalid", "bounced")], provider="resend")
+    assert await pool.fetchval(
+        "select verdict from email_verifications where email='a@x.com'") == "invalid"
