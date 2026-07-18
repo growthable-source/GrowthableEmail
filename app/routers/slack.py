@@ -109,6 +109,20 @@ async def slack_interactions(request: Request):
                      "emails submitted; I'll have verdicts shortly.")
         return Response(status_code=200)
 
+    if action["action_id"] in ("approve_resume", "cancel_resume"):
+        if action["action_id"] == "cancel_resume":
+            await slack.update_message(
+                channel, message_ts, text=f"⏸️ Kept paused by <@{user}>.")
+        else:
+            resumed = await pool.fetchval(
+                "update campaigns set status='ready' where id=$1::uuid "
+                "and status='paused' returning name", value["campaign_id"])
+            text = (f"▶️ *{resumed}* resumed by <@{user}> — back to 'ready'; "
+                    "propose the send when you're set."
+                    if resumed else "Campaign is no longer paused — nothing to do.")
+            await slack.update_message(channel, message_ts, text=text)
+        return Response(status_code=200)
+
     campaign_id = uuid.UUID(value["campaign_id"])
     campaign = await pool.fetchrow("select status from campaigns where id=$1", campaign_id)
     if campaign is None:

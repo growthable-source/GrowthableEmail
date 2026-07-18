@@ -230,3 +230,28 @@ async def test_cancel_verify_enqueues_nothing(client, pool):
     assert resp.status_code == 200
     assert (await pool.fetchval("select count(*) from jobs where name='verify_submit'")) == 0
     assert b"declined" in update.calls[0].request.read()
+
+
+@respx.mock
+async def test_approve_resume_sets_ready(client, pool):
+    update = respx.post(f"{SLACK_API}/chat.update").mock(
+        return_value=httpx.Response(200, json={"ok": True}))
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status) "
+        "values ('July', 'Big', 'newsletter', 'v1', 'paused') returning id")
+    resp = await post_interaction(client, "approve_resume", {"campaign_id": str(cid)})
+    assert resp.status_code == 200
+    assert (await pool.fetchval("select status from campaigns where id=$1", cid)) == "ready"
+    assert b"resumed" in update.calls[0].request.read()
+
+
+@respx.mock
+async def test_cancel_resume_stays_paused(client, pool):
+    respx.post(f"{SLACK_API}/chat.update").mock(
+        return_value=httpx.Response(200, json={"ok": True}))
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status) "
+        "values ('July', 'Big', 'newsletter', 'v1', 'paused') returning id")
+    resp = await post_interaction(client, "cancel_resume", {"campaign_id": str(cid)})
+    assert resp.status_code == 200
+    assert (await pool.fetchval("select status from campaigns where id=$1", cid)) == "paused"

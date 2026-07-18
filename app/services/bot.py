@@ -76,6 +76,9 @@ Rules:
   is impossible because of a cap. The daily send cap in your context only limits the
   per-email drip queue (GHL enrollments); deliverability kill rules still pause
   everything on bounce spikes.
+- If a campaign was paused by the deliverability guardrail, fix the cause first
+  (usually: verify the audience), then resume_campaign — it posts confirm buttons
+  and a human must click Resume.
 - Keep Slack replies short and skimmable. Use plain language.
 - If a tool returns an error, explain it briefly and suggest the fix."""
 
@@ -159,6 +162,11 @@ TOOLS = [
           "verdict (valid/invalid/risky/unknown) plus how many emails still lack a "
           "fresh verdict.",
           {"campaign_id": {"type": "string"}}, ["campaign_id"]),
+    _tool("resume_campaign",
+          "Resume a campaign paused by the deliverability guardrail. Posts confirm "
+          "buttons — a human must click Resume; the campaign returns to 'ready' and "
+          "still needs propose_send + approval to actually dispatch.",
+          {"campaign_id": {"type": "string"}}, ["campaign_id"]),
     _tool("propose_send",
           "Post the approval buttons for dispatch. Requires a prior successful seed test. "
           "when_iso: ISO-8601 datetime with timezone offset, omit to send immediately. "
@@ -211,6 +219,22 @@ def verify_approval_blocks(campaign_id: str, count: int, est_cost: float) -> lis
              "text": {"type": "plain_text", "text": "Verify"}, "value": value},
             {"type": "button", "style": "danger", "action_id": "cancel_verify",
              "text": {"type": "plain_text", "text": "Not now"}, "value": value},
+        ]},
+    ]
+
+
+def resume_blocks(campaign_id: str, name: str) -> list:
+    value = json.dumps({"campaign_id": campaign_id})
+    summary = (f"*Resume paused campaign:* {name}\nIt was paused by the "
+               "deliverability guardrail. Resuming returns it to 'ready' — it still "
+               "needs a send approval before anything goes out.")
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
+        {"type": "actions", "elements": [
+            {"type": "button", "style": "primary", "action_id": "approve_resume",
+             "text": {"type": "plain_text", "text": "Resume"}, "value": value},
+            {"type": "button", "style": "danger", "action_id": "cancel_resume",
+             "text": {"type": "plain_text", "text": "Keep paused"}, "value": value},
         ]},
     ]
 
@@ -328,6 +352,20 @@ class BotEngine(BaseBot):
             return {r["state"]: r["n"] for r in rows} or {"idle": True}
         if name == "verification_status":
             return await verification_summary(pool, uuid.UUID(args["campaign_id"]))
+        if name == "resume_campaign":
+            campaign = await pool.fetchrow(
+                "select id, name, status from campaigns where id=$1::uuid",
+                args["campaign_id"])
+            if campaign is None:
+                return {"error": "campaign not found"}
+            if campaign["status"] != "paused":
+                return {"error": f"campaign is not paused (status: {campaign['status']})"}
+            await self._slack.post_message(
+                self._turn_context["channel"], text="Resume paused campaign?",
+                blocks=resume_blocks(str(campaign["id"]), campaign["name"]),
+                thread_ts=self._turn_context["thread_ts"])
+            return {"posted": True, "note": "confirm buttons posted; a human must "
+                                            "click Resume"}
         if name == "propose_send":
             campaign = await pool.fetchrow(
                 "select * from campaigns where id=$1::uuid", args["campaign_id"])

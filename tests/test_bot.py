@@ -271,3 +271,33 @@ async def test_verification_status_tool(pool):
     await engine.handle_turn(TURN)
     result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
     assert result == {"valid": 1, "unverified": 0}
+
+
+async def test_resume_campaign_posts_confirm_buttons(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status) "
+        "values ('July', 'Big', 'newsletter', 'v1', 'paused') returning id")
+    engine, slack = make_engine(pool, [
+        [tool_block("resume_campaign", {"campaign_id": str(cid)})],
+        [text_block("Confirm to resume.")],
+    ])
+    await engine.handle_turn(TURN)
+    buttons = next(p for p in slack.posts if p["blocks"])
+    action_ids = [e["action_id"] for e in buttons["blocks"][-1]["elements"]]
+    assert action_ids == ["approve_resume", "cancel_resume"]
+    # still paused until a human clicks
+    assert (await pool.fetchval("select status from campaigns where id=$1", cid)) == "paused"
+
+
+async def test_resume_campaign_rejects_unpaused(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status) "
+        "values ('July', 'Big', 'newsletter', 'v1', 'ready') returning id")
+    engine, slack = make_engine(pool, [
+        [tool_block("resume_campaign", {"campaign_id": str(cid)})],
+        [text_block("Not paused.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "not paused" in result["error"]
+    assert all(p["blocks"] is None for p in slack.posts)
