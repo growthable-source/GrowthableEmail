@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     emailable_api_key: str = ""
     verify_approval_threshold: int = 1000  # verify runs above this need a human button-click
     verify_cost_per_email: float = 0.0038  # USD, for the approval message estimate
+    weekly_review_enabled: bool = True
+    weekly_review_dow: int = 0   # 0=Monday (bot_timezone)
+    weekly_review_hour: int = 9  # local hour the weekly review kicks off after
+    resonance_api_key: str = ""
+    resonance_api_url: str = ""
 
     @property
     def seed_list(self) -> list[str]:

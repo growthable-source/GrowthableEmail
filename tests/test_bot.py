@@ -301,3 +301,92 @@ async def test_resume_campaign_rejects_unpaused(pool):
     result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
     assert "not paused" in result["error"]
     assert all(p["blocks"] is None for p in slack.posts)
+
+
+# --- weekly-review data tools ------------------------------------------------
+
+async def test_campaign_history_rolls_up_events(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, "
+        "audience_filter) values ('Hist', 's', 'custom', 'v1', $1) returning id",
+        json.dumps([{"field": "tags", "operator": "eq", "value": "newsactive"}]))
+    sid = await pool.fetchval(
+        "insert into sends (campaign_id, ghl_contact_id, email, status, sent_at) "
+        "values ($1, 'c1', 'u@x.co', 'sent', now()) returning id", cid)
+    for etype in ("email.delivered", "email.opened", "email.opened", "email.clicked"):
+        await pool.execute(
+            "insert into events (send_id, type) values ($1, $2)", sid, etype)
+    engine, _ = make_engine(pool, [
+        [tool_block("campaign_history", {})], [text_block("done")]])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    camp = result["campaigns"][0]
+    assert camp["name"] == "Hist" and camp["audience_tag"] == "newsactive"
+    assert (camp["sent"], camp["delivered"], camp["opened"], camp["clicked"]) == (1, 1, 1, 1)
+
+
+async def test_tag_stats_and_engagement_segments(pool):
+    from app.services.verification import upsert_verdicts
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email, tags) values "
+        "('c1', 'a@x.co', array['newsactive', 'opened-july-launch']), "
+        "('c2', 'b@x.co', array['newsactive']), "
+        "('c3', 'e@x.co', array['vip', 'clicked-july-launch'])")
+    await upsert_verdicts(pool, [("a@x.co", "valid", "ok"), ("b@x.co", "risky", "role")])
+    engine, _ = make_engine(pool, [
+        [tool_block("tag_stats", {}, id="t1"),
+         tool_block("engagement_segments", {}, id="t2")],
+        [text_block("done")]])
+    await engine.handle_turn(TURN)
+    results = engine._client.requests[1]["messages"][-1]["content"]
+    tags = json.loads(results[0]["content"])["tags"]
+    news = next(t for t in tags if t["tag"] == "newsactive")
+    assert news["contacts"] == 2 and news["sendable"] == 1
+    assert all(not t["tag"].startswith("opened-") for t in tags)
+    segments = json.loads(results[1]["content"])["segments"]
+    assert {s["tag"] for s in segments} == {"opened-july-launch", "clicked-july-launch"}
+
+
+async def test_sales_activity_degrades_without_calendar_scope(pool):
+    class CalGHL(FakeGHL):
+        async def list_calendars(self):
+            raise RuntimeError("401 scope missing")
+
+        async def search_conversations(self, last_message_after_ms, page_limit=50):
+            for i in range(3):
+                yield {"contact_id": f"c{i}", "last_message_date": 99}
+
+    slack = FakeSlack()
+    engine = BotEngine(pool=pool, settings=make_settings(), ghl=CalGHL(), slack=slack,
+                       resend=None, client=FakeAnthropic([
+                           [tool_block("sales_activity", {"days": 30})],
+                           [text_block("done")]]))
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "unavailable" in result["appointments"]
+    assert result["conversations"] == 3
+
+
+async def test_recent_meetings_unavailable_without_key(pool):
+    engine, _ = make_engine(pool, [
+        [tool_block("recent_meetings", {})], [text_block("done")]])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "unavailable" in result
+
+
+async def test_recent_meetings_with_client(pool):
+    class FakeResonance:
+        async def recent_meetings(self, days=7):
+            return [{"title": "Sales sync", "summary": "Everyone wants the portal",
+                     "topics": ["portal", "pricing"]}]
+
+    slack = FakeSlack()
+    engine = BotEngine(pool=pool, settings=make_settings(), ghl=FakeGHL(), slack=slack,
+                       resend=None, resonance=FakeResonance(),
+                       client=FakeAnthropic([
+                           [tool_block("recent_meetings", {"days": 7})],
+                           [text_block("done")]]))
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert result["meetings"][0]["title"] == "Sales sync"

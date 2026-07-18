@@ -153,3 +153,16 @@ class GHLClient:
             "dndSettings": {"Email": {"status": "active",
                                       "message": "Suppressed by email pipeline"}},
         })
+
+    async def list_calendars(self) -> list[dict]:
+        data = await self._request("GET", "/calendars/",
+                                   params={"locationId": self.location_id})
+        return data.get("calendars") or []
+
+    async def calendar_events(self, calendar_id: str, start_ms: int,
+                              end_ms: int) -> list[dict]:
+        """Booked appointments for one calendar in [start_ms, end_ms] (epoch ms)."""
+        data = await self._request("GET", "/calendars/events", params={
+            "locationId": self.location_id, "calendarId": calendar_id,
+            "startTime": start_ms, "endTime": end_ms})
+        return data.get("events") or []

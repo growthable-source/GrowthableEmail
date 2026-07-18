@@ -19,9 +19,11 @@ from app.services.notify import notify_campaign_going_out, notify_post_going_out
 from app.services.resend_client import ResendClient
 from app.services.slack_client import SlackClient
 from app.services.social_dispatch import notify_due_social_posts
+from app.services.resonance import ResonanceClient
 from app.services.verification import (process_verification_jobs,
                                        warn_missing_verifier)
 from app.services.verify_client import EmailableClient
+from app.services.weekly_review import maybe_start_weekly_review
 from app.services.writeback import process_writeback_jobs
 
 log = logging.getLogger("worker")
@@ -36,12 +38,15 @@ async def run_forever() -> None:
     resend = ResendClient(settings.resend_api_key, rps=settings.send_rps)
     verifier = (EmailableClient(settings.emailable_api_key)
                 if settings.emailable_api_key else None)
+    resonance = (ResonanceClient(settings.resonance_api_url, settings.resonance_api_key)
+                 if settings.resonance_api_key and settings.resonance_api_url else None)
     slack = SlackClient(settings.slack_bot_token) if settings.slack_enabled else None
     engines: dict = {}
     if slack is not None:
         if settings.slack_channel_id:
             engines[settings.slack_channel_id] = BotEngine(
-                pool=pool, settings=settings, ghl=ghl, slack=slack, resend=resend)
+                pool=pool, settings=settings, ghl=ghl, slack=slack, resend=resend,
+                resonance=resonance)
         if settings.slack_social_channel_id:
             engines[settings.slack_social_channel_id] = SocialBot(
                 pool=pool, settings=settings, ghl=ghl, slack=slack)
@@ -75,6 +80,7 @@ async def run_forever() -> None:
             else:
                 await warn_missing_verifier(pool, slack)
             await maybe_post_daily_reports(pool, slack, settings)
+            await maybe_start_weekly_review(pool, slack, settings)
             await process_writeback_jobs(pool, ghl)
             if not breached:
                 broadcasts = await process_broadcast_campaigns(pool, settings, resend, slack)

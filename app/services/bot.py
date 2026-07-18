@@ -69,6 +69,18 @@ Workflow you must follow, in order:
    propose_send posts approval buttons — a human must click Send; you can never
    dispatch directly.
 
+WEEKLY REVIEW (when a message asks you to run the weekly marketing review):
+you are the marketing manager. Pull campaign_history, tag_stats,
+engagement_segments, sales_activity and recent_meetings. Post ONE short analysis
+message: what worked, what's decaying, what prospects are asking about (meetings
++ conversations), and the sendable audience inventory. Then propose 1-2
+campaigns MAX with a clear goal each (bookings, reactivation, launch
+follow-up), draft them fully per the brand guide, run seed tests, and finish
+with propose_send + a one-line "why this, why now" per campaign. Do not email
+an audience that received a campaign in the last 7 days unless engagement data
+justifies it. If a data source is unavailable, say so in one line and plan
+without it.
+
 Rules:
 - Never skip the seed test. Never call propose_send before send_seed_test succeeded.
 - There is NO hard cap on campaign size: a broadcast sends everything at once, and a
@@ -162,6 +174,25 @@ TOOLS = [
           "verdict (valid/invalid/risky/unknown) plus how many emails still lack a "
           "fresh verdict.",
           {"campaign_id": {"type": "string"}}, ["campaign_id"]),
+    _tool("campaign_history",
+          "Performance of all campaigns in the last N days (default 90): audience, "
+          "sent/delivered/opened/clicked/bounced/complained counts. Use for the "
+          "weekly review and before proposing anything new.",
+          {"days": {"type": "integer", "minimum": 7, "maximum": 365}}, []),
+    _tool("tag_stats",
+          "Audience inventory: contact counts per GHL tag with how many are "
+          "verified-sendable. Use to pick real audiences.", {}, []),
+    _tool("engagement_segments",
+          "Warm segments: counts of contacts carrying opened-*/clicked-* engagement "
+          "tags per past campaign — who is warm, on which topic.", {}, []),
+    _tool("sales_activity",
+          "Sales-calendar bookings and CRM conversation volume for the last N days "
+          "(default 90). The strongest what-to-promote signal.",
+          {"days": {"type": "integer", "minimum": 7, "maximum": 180}}, []),
+    _tool("recent_meetings",
+          "Summaries and topics from the team's meetings (Resonance notetaker) for "
+          "the last N days (default 7): what prospects asked, objections, launches.",
+          {"days": {"type": "integer", "minimum": 1, "maximum": 30}}, []),
     _tool("resume_campaign",
           "Resume a campaign paused by the deliverability guardrail. Posts confirm "
           "buttons — a human must click Resume; the campaign returns to 'ready' and "
@@ -245,9 +276,11 @@ class BotEngine(BaseBot):
     system_prompt = SYSTEM_PROMPT
     tools = TOOLS
 
-    def __init__(self, pool, settings: Settings, ghl, slack, resend, client=None):
+    def __init__(self, pool, settings: Settings, ghl, slack, resend, client=None,
+                 resonance=None):
         super().__init__(pool, settings, ghl, slack, client=client)
         self._resend = resend or ResendClient(settings.resend_api_key, rps=settings.send_rps)
+        self._resonance = resonance
 
     def _system(self) -> str:
         return (f"{super()._system()} Daily send cap (drip queue only — campaign "
@@ -352,6 +385,83 @@ class BotEngine(BaseBot):
             return {r["state"]: r["n"] for r in rows} or {"idle": True}
         if name == "verification_status":
             return await verification_summary(pool, uuid.UUID(args["campaign_id"]))
+        if name == "campaign_history":
+            days = args.get("days", 90)
+            rows = await pool.fetch(
+                """select c.name, c.status, c.send_via, c.audience_filter,
+                          c.created_at::date::text as created,
+                          count(distinct s.id) filter (where s.status='sent') as sent,
+                          count(distinct e.send_id) filter (where e.type='email.delivered') as delivered,
+                          count(distinct e.send_id) filter (where e.type='email.opened') as opened,
+                          count(distinct e.send_id) filter (where e.type='email.clicked') as clicked,
+                          count(distinct e.send_id) filter (where e.type='email.bounced') as bounced,
+                          count(distinct e.send_id) filter (where e.type='email.complained') as complained
+                   from campaigns c
+                   left join sends s on s.campaign_id = c.id
+                   left join events e on e.send_id = s.id
+                   where c.created_at > now() - make_interval(days => $1)
+                   group by c.id order by c.created_at desc""", days)
+            out = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    filters = json.loads(d.pop("audience_filter") or "[]")
+                    d["audience_tag"] = filters[0]["value"] if filters else None
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    d["audience_tag"] = None
+                out.append(d)
+            return {"campaigns": out}
+        if name == "tag_stats":
+            rows = await pool.fetch(
+                """select tag, count(*) as contacts,
+                          count(*) filter (where exists
+                              (select 1 from email_verifications v
+                               where v.email = c.email and v.verdict = 'valid')) as sendable
+                   from contacts_cache c, unnest(c.tags) as tag
+                   where tag not like 'opened-%' and tag not like 'clicked-%'
+                     and tag not like 'emailed-%'
+                   group by tag order by contacts desc limit 40""")
+            return {"tags": [dict(r) for r in rows]}
+        if name == "engagement_segments":
+            rows = await pool.fetch(
+                """select tag, count(*) as contacts
+                   from contacts_cache c, unnest(c.tags) as tag
+                   where tag like 'opened-%' or tag like 'clicked-%'
+                   group by tag order by contacts desc limit 30""")
+            return {"segments": [dict(r) for r in rows]}
+        if name == "sales_activity":
+            days = args.get("days", 90)
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            start_ms = now_ms - days * 86_400_000
+            result: dict = {"days": days}
+            try:
+                calendars = await self._ghl.list_calendars()
+                appointments = []
+                for cal in calendars:
+                    events = await self._ghl.calendar_events(
+                        cal.get("id") or cal.get("_id"), start_ms, now_ms)
+                    appointments.append({"calendar": cal.get("name"),
+                                         "booked": len(events)})
+                result["appointments_by_calendar"] = appointments
+                result["appointments_total"] = sum(a["booked"] for a in appointments)
+            except Exception as exc:
+                result["appointments"] = (f"unavailable ({str(exc)[:120]}) — "
+                                          "PIT may lack calendars.readonly scope")
+            convo_count = 0
+            async for _ in self._ghl.search_conversations(start_ms):
+                convo_count += 1
+                if convo_count >= 500:
+                    break
+            result["conversations"] = (f"{convo_count}+" if convo_count >= 500
+                                       else convo_count)
+            return result
+        if name == "recent_meetings":
+            if self._resonance is None:
+                return {"unavailable": "RESONANCE_API_KEY/RESONANCE_API_URL not "
+                                       "set on the worker — planning without "
+                                       "meeting data"}
+            meetings = await self._resonance.recent_meetings(args.get("days", 7))
+            return {"meetings": meetings[:25]}
         if name == "resume_campaign":
             campaign = await pool.fetchrow(
                 "select id, name, status from campaigns where id=$1::uuid",
