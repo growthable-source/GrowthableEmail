@@ -51,7 +51,7 @@ async def test_build_email_stats_aggregates_across_campaigns(pool):
     assert stats["delivered"] == 1 and stats["opened"] == 1 and stats["bounced"] == 1
     assert stats["clicked"] == 0 and stats["complained"] == 0
     assert stats["completed_campaigns"] == 1
-    assert stats["paused_campaigns"] == ["B"]
+    assert stats["paused_campaigns"] == [{"name": "B", "queued": 0}]
 
 
 async def test_build_social_stats_counts_by_status_and_upcoming(pool):
@@ -82,13 +82,17 @@ async def test_build_social_stats_counts_by_status_and_upcoming(pool):
 
 
 def test_format_email_report_flags_paused():
+    """Paused campaigns with queued work read differently from empty ones: the
+    former auto-resume, the latter sit forever unless a human acts."""
     text = format_email_report({
         "sent": 10, "failed": 0, "delivered": 9, "opened": 4, "clicked": 1,
         "bounced": 0, "complained": 0, "active_campaigns": 1, "completed_campaigns": 1,
-        "paused_campaigns": ["July Launch"],
+        "paused_campaigns": [{"name": "July Launch", "queued": 1200},
+                             {"name": "Zombie", "queued": 0}],
     })
     assert "Sent: *10*" in text
-    assert "Paused by guardrails:* July Launch" in text
+    assert "Paused:* July Launch" in text and "1,200 queued" in text
+    assert "Zombie" in text and "resume or cancel" in text
 
 
 def test_format_social_report_no_upcoming():

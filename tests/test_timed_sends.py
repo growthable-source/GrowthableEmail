@@ -109,6 +109,56 @@ async def test_ensure_timed_queues_fills_once_and_pauses_empty(pool):
     assert (await pool.fetchval("select count(*) from sends")) == 1
 
 
+async def test_queue_fill_waits_for_pending_verification(pool):
+    """Launch racing verification: zero verified *right now* must not pause the
+    campaign — verdicts land minutes later and the next tick fills the queue."""
+    cid = await seed_timed_campaign(pool)
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('p0', 'p0@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'p0')",
+        cid)
+    await ensure_timed_queues(pool, make_settings())
+    assert (await pool.fetchval(
+        "select status from campaigns where id=$1", cid)) == "dispatching"
+    await verify_all_contacts(pool)
+    await ensure_timed_queues(pool, make_settings())
+    assert (await pool.fetchval(
+        "select count(*) from sends where campaign_id=$1", cid)) == 1
+
+
+async def test_empty_queue_pause_posts_to_slack(pool):
+    """A campaign with no sendable recipients (verdicts in, none valid) pauses
+    loudly in its campaign thread instead of only a server-side log."""
+    class FakeSlack:
+        def __init__(self):
+            self.posts = []
+
+        async def post_message(self, channel, text=None, blocks=None, thread_ts=None):
+            self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+            return "1.1"
+
+    cid = await seed_timed_campaign(pool)
+    await pool.execute(
+        "update campaigns set channel='C0TEST', thread_ts='100.1' where id=$1", cid)
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('r0', 'r0@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'r0')",
+        cid)
+    await pool.execute(
+        "insert into email_verifications (email, verdict, provider) "
+        "values ('r0@x.co', 'risky', 'test')")
+    slack = FakeSlack()
+    await ensure_timed_queues(pool, make_settings(), slack)
+    assert (await pool.fetchval(
+        "select status from campaigns where id=$1", cid)) == "paused"
+    assert len(slack.posts) == 1
+    assert slack.posts[0]["channel"] == "C0TEST"
+    assert slack.posts[0]["thread_ts"] == "100.1"
+    assert "paused" in slack.posts[0]["text"].lower()
+
+
 # --- ramp caps ---------------------------------------------------------------
 
 async def make_due(pool, cid):

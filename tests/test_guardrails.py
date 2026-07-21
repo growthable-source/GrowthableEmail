@@ -48,6 +48,25 @@ async def test_low_volume_days_never_trip(pool):
     assert await check_and_pause(pool) is False
 
 
+async def test_small_sample_noise_does_not_trip(pool):
+    """A few hundred sends is too small to judge a 3% threshold: one extra bounce
+    swings the rate half a point. Real incident 2026-07-21 — a campaign whose
+    full-day rate ran 1.6-1.9% tripped three times at exactly 200 sends, costing
+    a day each time. The rate limits are unchanged; only the sample floor moves."""
+    cid = await seed_day(pool, sent=200, bounced=7, complained=0)  # 3.5%, n too small
+    assert await check_and_pause(pool) is False
+    assert (await pool.fetchval(
+        "select status from campaigns where id=$1", cid)) == "dispatching"
+
+
+async def test_breach_still_trips_on_a_meaningful_sample(pool):
+    """The floor must not become a loophole: a genuinely bad list still gets caught
+    once enough sends have gone out to be sure."""
+    cid = await seed_day(pool, sent=1000, bounced=35, complained=0)  # 3.5%, n sufficient
+    assert await check_and_pause(pool) is True
+    assert (await pool.fetchval("select status from campaigns where id=$1", cid)) == "paused"
+
+
 class FakeSlack:
     def __init__(self):
         self.posts = []

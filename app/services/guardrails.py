@@ -9,7 +9,13 @@ log = logging.getLogger(__name__)
 
 BOUNCE_RATE_LIMIT = 0.03      # spec §2/§12: hard bounce > 3% on a day
 COMPLAINT_RATE_LIMIT = 0.001  # spec §2/§12: complaint > 0.1% on a day
-MIN_DAILY_VOLUME = 200        # don't trip on statistically meaningless samples
+# Don't trip on statistically meaningless samples. At n=200 a single bounce moves
+# the rate half a point, so a list running a healthy ~1.8% crosses 3% on noise
+# alone — which is exactly what stalled the July ramp three times (2026-07-17/18/21),
+# a full day lost each time while its uninterrupted days measured 1.6-1.9%.
+# n=1000 makes 3% ~4 standard deviations out for such a list: real breaches still
+# trip, noise doesn't. The rate limits themselves are unchanged.
+MIN_DAILY_VOLUME = 1000
 
 MAX_AUTO_RESUMES = 3          # circuit breaker: unattended retries before a human
 MIN_PER_HOUR = 50             # rate never backs off below this

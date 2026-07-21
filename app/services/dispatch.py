@@ -86,8 +86,30 @@ async def ensure_timed_queues(pool, settings: Settings, slack=None) -> None:
     for r in rows:
         queued = await enqueue_timed_sends(pool, settings, r["id"])
         if queued == 0:
+            # zero verified can mean verification is still in flight (verdicts
+            # land minutes after launch) — pausing now would strand the campaign
+            # forever, since auto-resume only touches campaigns with queued sends
+            pending = await pool.fetchval(
+                """select count(*) from campaign_contacts cc
+                   join contacts_cache c using (ghl_contact_id)
+                   where cc.campaign_id = $1 and c.dnd = false
+                     and not exists (select 1 from suppressions s where s.email = c.email)
+                     and not exists (select 1 from email_verifications v
+                                     where v.email = c.email)""", r["id"])
+            if pending:
+                log.info("timed campaign %s queue empty, %s contacts awaiting "
+                         "verification — retrying next tick", r["id"], pending)
+                continue
             await pool.execute("update campaigns set status='paused' where id=$1", r["id"])
             log.error("timed campaign %s paused: audience empty after drop rules", r["id"])
+            if slack is not None and r["channel"]:
+                await slack.post_message(
+                    r["channel"],
+                    text=f"⏸️ *{r['name']}* paused before launch: none of its "
+                         "enrolled contacts are sendable (invalid/risky verdicts, "
+                         "suppressed, or DND). Fix the audience and resume, or "
+                         "cancel the campaign.",
+                    thread_ts=r["thread_ts"])
             continue
         log.info("timed campaign %s queued %s sends", r["id"], queued)
         if slack is not None and r["channel"]:
