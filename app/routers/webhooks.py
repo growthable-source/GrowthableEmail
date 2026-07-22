@@ -1,21 +1,17 @@
 import json
 import logging
-import re
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from svix.webhooks import Webhook, WebhookVerificationError
 
+from app.services.dispatch import slugify
 from app.services.jobs import enqueue
 from app.services.suppressions import add_suppression, is_suppressed, normalize
 from app.services.verification import request_verification, upsert_verdicts
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 ENGAGEMENT_TAG_PREFIX = {

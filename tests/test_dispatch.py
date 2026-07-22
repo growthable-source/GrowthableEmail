@@ -3,8 +3,9 @@ import respx
 
 import json as _json
 
-from app.services.dispatch import (enqueue_campaign_sends, process_send_queue,
-                                   promote_scheduled, requeue_stale)
+from app.services.dispatch import (add_utm_params, enqueue_campaign_sends,
+                                   process_send_queue, promote_scheduled,
+                                   requeue_stale)
 from app.services.resend_client import ResendClient
 from app.services.suppressions import add_suppression
 from tests.helpers import make_settings, verify_all_contacts
@@ -167,6 +168,71 @@ async def test_custom_full_document_personalized_and_unsub_substituted(pool):
     assert "http://testserver/u/" in body["html"]      # real signed unsub link merged in
     assert "Bespoke Ada!" in body["text"]              # plain-text part generated
     assert "List-Unsubscribe" in str(body["headers"])  # headers still applied
+
+
+# --- UTM link tagging -------------------------------------------------------
+
+SKIP_HOST = "testserver"  # matches make_settings().public_base_url host
+
+
+def test_utm_tags_plain_external_link():
+    out = add_utm_params('<a href="https://growthable.io/co-pilot/">x</a>',
+                         "july-launch", SKIP_HOST)
+    assert ('href="https://growthable.io/co-pilot/?'
+            "utm_source=newsletter&utm_medium=email&utm_campaign=july-launch"'"') in out
+
+
+def test_utm_preserves_existing_query_and_fragment():
+    out = add_utm_params('<a href="https://g.io/p?ref=x#pricing">x</a>',
+                         "camp", SKIP_HOST)
+    assert "ref=x" in out and "utm_campaign=camp" in out
+    assert out.index("#pricing") > out.index("utm_campaign=camp")  # fragment stays last
+
+
+def test_utm_skips_our_own_unsub_and_preferences_links():
+    # after substitution these point at public_base_url — must not be tagged
+    html = ('<a href="http://testserver/u/tok">Unsubscribe</a>'
+            '<a href="http://testserver/u/tok">Preferences</a>')
+    assert add_utm_params(html, "camp", SKIP_HOST) == html
+
+
+def test_utm_skips_non_http_links():
+    html = '<a href="mailto:hi@x.co">m</a><a href="#top">a</a><a href="tel:+1">t</a>'
+    assert add_utm_params(html, "camp", SKIP_HOST) == html
+
+
+def test_utm_does_not_double_tag():
+    once = add_utm_params('<a href="https://g.io/">x</a>', "camp", SKIP_HOST)
+    twice = add_utm_params(once, "camp", SKIP_HOST)
+    assert once == twice
+    assert twice.count("utm_source=newsletter") == 1
+
+
+@respx.mock
+async def test_send_path_tags_links_but_not_unsub(pool):
+    doc = ('<!DOCTYPE html><html><body>'
+           '<a href="https://growthable.io/co-pilot/">Co-Pilot</a>'
+           '<a href="{{unsubscribe_url}}">Unsubscribe</a></body></html>')
+    route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_1"}))
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status, content) "
+        "values ('July Launch', 'S', 'custom', 'v1', 'ready', $1) returning id",
+        _json.dumps({"html_body": doc}))
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('c0', 'u@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c0')", cid)
+    await verify_all_contacts(pool)
+    await enqueue_campaign_sends(pool, cid)
+    sent = await process_send_queue(pool, make_settings(),
+                                    ResendClient("re", rps=10_000, backoff_base=0))
+    assert sent == 1
+    html = _json.loads(route.calls[0].request.read())["html"]
+    assert "utm_source=newsletter&utm_medium=email&utm_campaign=july-launch" in html
+    assert "http://testserver/u/" in html               # unsub still merged
+    assert "/u/tok" not in html
+    # the unsub link itself carries no utm
+    assert "utm_source" not in html.split('href="http://testserver')[1].split('"')[0]
 
 
 @respx.mock

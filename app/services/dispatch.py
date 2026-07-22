@@ -3,6 +3,7 @@ import html as html_lib
 import json
 import logging
 import re
+import urllib.parse
 from datetime import datetime, timezone
 
 from app.config import Settings
@@ -167,6 +168,45 @@ async def promote_scheduled(pool) -> list:
         "update campaigns set status='dispatching' "
         "where status='scheduled' and scheduled_at <= now() returning id")
     return [r["id"] for r in rows]
+
+
+def slugify(name: str) -> str:
+    """Kebab slug for a campaign. Kept identical to the engagement-tag slug in
+    webhooks.py so utm_campaign matches the opened-/clicked- tags for the same
+    campaign — one campaign, one slug across analytics and CRM."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+UTM_STATIC = {"utm_source": "newsletter", "utm_medium": "email"}
+
+
+def add_utm_params(html: str, campaign_slug: str, skip_host: str) -> str:
+    """Tag external http(s) links with UTM params for site-side attribution.
+
+    Runs on the final HTML (after unsub substitution), so it deliberately skips:
+    our own tracked links (same host as public_base_url — unsubscribe/preferences),
+    non-http links (mailto/tel/#anchors), and links already carrying a utm_source
+    (never clobber a hand-tagged URL). Existing query params and #fragments are
+    preserved. Complements Resend click tracking: the redirect lands on this
+    tagged URL, so GA still sees the campaign."""
+    def rewrite(match: re.Match) -> str:
+        url = match.group(1)
+        if not re.match(r"https?://", url, re.I):
+            return match.group(0)
+        parts = urllib.parse.urlsplit(url)
+        if skip_host and parts.netloc == skip_host:
+            return match.group(0)
+        query = urllib.parse.parse_qs(parts.query, keep_blank_values=True)
+        if "utm_source" in query:
+            return match.group(0)
+        query.update({k: [v] for k, v in UTM_STATIC.items()})
+        query["utm_campaign"] = [campaign_slug]
+        new_query = urllib.parse.urlencode(query, doseq=True)
+        new_url = urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+        return f'href="{new_url}"'
+
+    return re.sub(r'href="([^"]+)"', rewrite, html)
 
 
 def _unsub_url(settings: Settings, email: str, campaign_id) -> str:
@@ -358,8 +398,10 @@ async def _dispatch_claimed(pool, settings: Settings, resend: ResendClient,
         return 0
 
     campaign = await pool.fetchrow(
-        "select subject, template_ref, content from campaigns where id=$1", campaign_id)
+        "select name, subject, template_ref, content from campaigns where id=$1", campaign_id)
     content = json.loads(campaign["content"])
+    campaign_slug = slugify(campaign["name"])
+    skip_host = urllib.parse.urlsplit(settings.public_base_url).netloc
     contacts, unsub_urls = [], []
     for send in sends:
         contact = await pool.fetchrow(
@@ -399,7 +441,7 @@ async def _dispatch_claimed(pool, settings: Settings, resend: ResendClient,
             "from": settings.from_email,
             "to": [send["email"]],
             "subject": campaign["subject"],
-            "html": r.html,
+            "html": add_utm_params(r.html, campaign_slug, skip_host),
             "text": r.text,
             "headers": build_headers(settings, unsub),
         }
