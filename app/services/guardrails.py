@@ -37,13 +37,23 @@ async def check_and_pause(pool, alert_webhook_url: str | None = None,
 
     Alerts fire only when campaigns were actually paused this call — the breach
     persists in the day's rates for hours, and the worker re-checks every tick."""
+    # Numerator and denominator must describe the same cohort — today's *sends* — and
+    # the numerator must be hard bounces only, matching BOUNCE_RATE_LIMIT's definition
+    # and webhooks.py, which already declines to suppress a Transient bounce. Attributing
+    # by event date instead charged yesterday's lagging soft bounces against today's
+    # small post-resume denominator; on 2026-07-24 that read 4.3% for a 3.3% hard rate.
+    # Unknown bounce type counts as hard, the same conservative default webhooks.py takes.
     stats = await pool.fetchrow(
-        """select
-               (select count(*) from sends where sent_at >= date_trunc('day', now())) as sent,
-               (select count(distinct send_id) from events
-                where type='email.bounced' and occurred_at >= date_trunc('day', now())) as bounced,
-               (select count(distinct send_id) from events
-                where type='email.complained' and occurred_at >= date_trunc('day', now())) as complained""")
+        """with today as (
+               select id from sends where sent_at >= date_trunc('day', now()))
+           select
+               (select count(*) from today) as sent,
+               (select count(distinct e.send_id) from events e join today t on t.id = e.send_id
+                where e.type='email.bounced'
+                  and coalesce(e.payload->'data'->'bounce'->>'type',
+                               e.payload->'bounce'->>'type', 'Permanent') <> 'Transient') as bounced,
+               (select count(distinct e.send_id) from events e join today t on t.id = e.send_id
+                where e.type='email.complained') as complained""")
     sent, bounced, complained = stats["sent"], stats["bounced"], stats["complained"]
     if sent < MIN_DAILY_VOLUME:
         return False

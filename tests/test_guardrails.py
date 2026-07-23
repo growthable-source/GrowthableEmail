@@ -67,6 +67,53 @@ async def test_breach_still_trips_on_a_meaningful_sample(pool):
     assert (await pool.fetchval("select status from campaigns where id=$1", cid)) == "paused"
 
 
+async def test_transient_bounces_do_not_count_against_the_hard_limit(pool):
+    """BOUNCE_RATE_LIMIT is a *hard* bounce limit, and webhooks.py already refuses to
+    suppress a Transient bounce. Counting soft bounces here judged the list against a
+    limit it was never meant to meet: 2026-07-24 read 4.3% where the hard rate was 3.3%.
+    Mailbox-full and deferrals are not list-quality signals."""
+    cid = await seed_day(pool, sent=1000, bounced=0, complained=0)
+    for i in range(40):
+        send_id = await pool.fetchval(
+            "select id from sends where campaign_id=$1 offset $2 limit 1", cid, i)
+        await pool.execute(
+            "insert into events (send_id, type, payload) values ($1, 'email.bounced', $2)",
+            send_id, '{"data": {"bounce": {"type": "Transient"}}}')
+    assert await check_and_pause(pool) is False
+    assert (await pool.fetchval(
+        "select status from campaigns where id=$1", cid)) == "dispatching"
+
+
+async def test_hard_bounces_still_trip_when_payload_says_permanent(pool):
+    """The Transient carve-out must not become a loophole."""
+    cid = await seed_day(pool, sent=1000, bounced=0, complained=0)
+    for i in range(40):
+        send_id = await pool.fetchval(
+            "select id from sends where campaign_id=$1 offset $2 limit 1", cid, i)
+        await pool.execute(
+            "insert into events (send_id, type, payload) values ($1, 'email.bounced', $2)",
+            send_id, '{"data": {"bounce": {"type": "Permanent"}}}')
+    assert await check_and_pause(pool) is True
+
+
+async def test_bounces_count_against_the_day_the_send_went_out(pool):
+    """Numerator and denominator must cover the same cohort. Bounces lag hours, so
+    attributing them to the event date charged yesterday's tail against today's small
+    post-resume denominator — inflating the rate exactly when the ramp restarts."""
+    cid = await seed_day(pool, sent=1000, bounced=0, complained=0)
+    for i in range(40):  # 40 *distinct* older sends, all bouncing today
+        old = await pool.fetchval(
+            "insert into sends (campaign_id, ghl_contact_id, email, status, sent_at) "
+            "values ($1, $2, $3, 'sent', now() - interval '2 days') returning id",
+            cid, f"old{i}", f"old{i}@x.co")
+        await pool.execute(
+            "insert into events (send_id, type, payload) values ($1, 'email.bounced', $2)",
+            old, '{"data": {"bounce": {"type": "Permanent"}}}')
+    assert await check_and_pause(pool) is False
+    assert (await pool.fetchval(
+        "select status from campaigns where id=$1", cid)) == "dispatching"
+
+
 class FakeSlack:
     def __init__(self):
         self.posts = []
