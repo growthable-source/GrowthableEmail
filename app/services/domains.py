@@ -35,11 +35,17 @@ async def adjust_and_guard(pool, settings) -> None:
     """Hourly: weekly cap doubling for healthy domains; pause on bounce spikes."""
     domains = await pool.fetch("select * from sending_domains where active")
     for d in domains:
+        # Hard bounces only, same as guardrails.check_and_pause (2026-07-24 fix):
+        # Transient bounces (mailbox full, greylisting) don't indicate list decay
+        # and were inflating the pause rate. Unknown type counts as hard —
+        # webhooks.py's conservative default.
         stats = await pool.fetchrow(
             """select
-                 count(*) filter (where s.sent_at >= now() - interval '1 day') as sent_1d,
-                 count(*) filter (where e.type = 'email.bounced'
-                                  and s.sent_at >= now() - interval '1 day') as bounced_1d
+                 count(distinct s.id) filter (where s.sent_at >= now() - interval '1 day') as sent_1d,
+                 count(distinct s.id) filter (where e.type = 'email.bounced'
+                                  and s.sent_at >= now() - interval '1 day'
+                                  and coalesce(e.payload->'data'->'bounce'->>'type',
+                                               e.payload->'bounce'->>'type', 'Permanent') <> 'Transient') as bounced_1d
                from sends s left join events e on e.send_id = s.id
                where s.from_domain = $1""", d["domain"])
         sent, bounced = stats["sent_1d"] or 0, stats["bounced_1d"] or 0
