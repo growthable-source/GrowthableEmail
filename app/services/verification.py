@@ -8,10 +8,12 @@ Verdicts are PERMANENT — each email is billed to the provider at most once, ev
 anything that slips through. To force a re-check, delete the row."""
 import logging
 
+import httpx
+
 from app.config import Settings
 from app.services.jobs import complete_job, enqueue, fail_job, fetch_job
 from app.services.suppressions import normalize
-from app.services.verify_client import map_result
+from app.services.verify_client import InsufficientCreditsError, map_result
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +21,7 @@ BATCH_CHUNK = 1000       # emails per Emailable batch
 POLL_DELAY_SECONDS = 30
 MAX_POLL_ATTEMPTS = 240  # ~2h at 30s: a batch stalled this long (e.g. credits ran
                          # out mid-run) is abandoned so it can't jam the pipeline
+CREDIT_POLL_SECONDS = 900  # how often the credit watch re-checks the Emailable account
 VERDICT_TAGS = {"invalid": "email-invalid", "risky": "email-risky",
                 "unknown": "email-risky"}
 
@@ -200,6 +203,14 @@ async def process_verification_jobs(pool, settings: Settings, client, slack=None
                               {"batch_id": batch_id,
                                "campaign_id": job["data"]["campaign_id"]},
                               start_after_seconds=POLL_DELAY_SECONDS)
+        except InsufficientCreditsError:
+            # Out of credits is an account state, not a transient fault — burning
+            # job retries would just dead-letter it silently. Complete the job,
+            # alert loudly (once), and arm the credit watch, which re-creates
+            # verify_submit jobs the moment a top-up lands.
+            await complete_job(pool, job["id"])
+            await _credits_exhausted(pool, settings)
+            continue
         except Exception:
             log.exception("verify_submit job %s failed", job["id"])
             await fail_job(pool, job["id"], backoff_seconds=backoff_seconds)
@@ -235,4 +246,76 @@ async def process_verification_jobs(pool, settings: Settings, client, slack=None
             continue
         await complete_job(pool, job["id"])
         done += 1
+
+    # Credit watch: exists only after an InsufficientCreditsError. Polls the
+    # account until a top-up appears, then re-creates verify_submit jobs for
+    # every campaign still holding unverified queued sends and stands down.
+    while (job := await fetch_job(pool, "verify_credit_watch")) is not None:
+        try:
+            credits = await client.get_credits()
+            if credits is None or credits <= 0:
+                await complete_job(pool, job["id"])
+                await enqueue(pool, "verify_credit_watch", {},
+                              start_after_seconds=CREDIT_POLL_SECONDS)
+                continue
+            campaigns = await pool.fetch(
+                """select distinct s.campaign_id from sends s
+                   where s.status='queued'
+                     and not exists (select 1 from email_verifications v
+                                     where v.email = s.email)""")
+            for r in campaigns:
+                await enqueue(pool, "verify_submit",
+                              {"campaign_id": str(r["campaign_id"])})
+            await complete_job(pool, job["id"])
+            await _alert(settings,
+                         f"✅ Emailable credits are back ({credits} available) — "
+                         f"verification re-queued for {len(campaigns)} campaign(s); "
+                         f"held sends resume as verdicts land.")
+            log.info("credit watch: %s credits — resumed %s campaign(s)",
+                     credits, len(campaigns))
+        except Exception:
+            log.exception("verify_credit_watch job %s failed", job["id"])
+            await fail_job(pool, job["id"], backoff_seconds=CREDIT_POLL_SECONDS)
+        done += 1
     return done
+
+
+async def _credits_exhausted(pool, settings: Settings) -> None:
+    """Alert (once per outage) and arm the credit watch. The watch job's
+    existence doubles as the already-alerted flag, so ten campaigns hitting
+    402 in one pass produce one @channel ping, not ten."""
+    existing = await pool.fetchval(
+        "select count(*) from jobs where name='verify_credit_watch' "
+        "and state in ('created', 'active')")
+    if existing:
+        return
+    await enqueue(pool, "verify_credit_watch", {},
+                  start_after_seconds=CREDIT_POLL_SECONDS)
+    held = await pool.fetchval(
+        """select count(*) from sends s
+           where s.status='queued'
+             and not exists (select 1 from email_verifications v
+                             where v.email = s.email)""") or 0
+    mentions = "<!channel>"
+    if settings.alert_mention_ids:
+        mentions += " " + " ".join(
+            f"<@{i.strip()}>" for i in settings.alert_mention_ids.split(",") if i.strip())
+    await _alert(settings,
+                 f"{mentions} 🛑 Emailable is OUT OF CREDITS — {held} queued email(s) "
+                 f"are held behind verification (fail-safe: nothing unverified sends). "
+                 f"Top up at https://app.emailable.com and everything resumes "
+                 f"automatically — I re-check every {CREDIT_POLL_SECONDS // 60} minutes.")
+    log.warning("emailable credits exhausted — %s sends held, credit watch armed", held)
+
+
+async def _alert(settings: Settings, text: str) -> None:
+    """Ops alert via the incoming webhook (same channel as domain pauses). The
+    campaign-thread Slack bot isn't configured on the outbound instance."""
+    if not settings.alert_webhook_url:
+        log.warning("alert (no webhook configured): %s", text)
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(settings.alert_webhook_url, json={"text": text})
+    except httpx.HTTPError:
+        log.warning("alert webhook post failed")

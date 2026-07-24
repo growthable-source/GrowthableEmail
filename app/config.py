@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     ideal_send_hour: int = 10  # local hour timed sends target in each contact's timezone
     seed_emails: str = ""
     alert_webhook_url: str | None = None
+    # Comma-separated Slack member IDs (e.g. "U0123ABC") tagged personally on
+    # critical ops alerts (credit exhaustion) in addition to <!channel>.
+    alert_mention_ids: str = ""
     slack_enabled: bool = False
     slack_bot_token: str = ""
     slack_signing_secret: str = ""

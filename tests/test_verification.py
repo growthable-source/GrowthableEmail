@@ -347,3 +347,91 @@ async def test_late_duplicate_batch_does_not_reannounce_completion(pool):
     await pool.execute("update jobs set start_after=now() where state='created'")
     await process_verification_jobs(pool, settings, client, slack=slack)
     assert sum("✅" in p["text"] for p in slack.posts) == 1  # still exactly one
+
+
+# ---- credit exhaustion + auto-resume ------------------------------------------
+
+class BrokeVerifyClient(FakeVerifyClient):
+    """402 on every batch; configurable account balance for the credit watch."""
+    def __init__(self, credits=0):
+        super().__init__()
+        self.credits = credits
+
+    async def create_batch(self, emails):
+        from app.services.verify_client import InsufficientCreditsError
+        raise InsufficientCreditsError("emailable: insufficient credits")
+
+    async def get_credits(self):
+        return self.credits
+
+
+async def _queue_send(pool, cid, email, gid=None):
+    gid = gid or f"g{uuid.uuid4().hex[:8]}"
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email, dnd, synced_at) "
+        "values ($1, $2, false, now()) on conflict (ghl_contact_id) do nothing", gid, email)
+    await pool.execute(
+        "insert into sends (campaign_id, ghl_contact_id, email) values ($1, $2, $3)",
+        cid, gid, email)
+
+
+async def test_credit_exhaustion_alerts_once_and_arms_watch(pool, respx_mock=None):
+    import httpx
+    import respx
+    with respx.mock:
+        hook = respx.post("https://hooks.slack.test/alert").mock(
+            return_value=httpx.Response(200))
+        cid = await seed_campaign(pool, ["a@x.com", "b@x.com"])
+        await _queue_send(pool, cid, "a@x.com")
+        settings = make_settings(alert_webhook_url="https://hooks.slack.test/alert",
+                                 alert_mention_ids="U0RYAN")
+        await request_verification(pool, settings, cid)
+        await request_verification(pool, settings, cid)  # second submit job
+        await process_verification_jobs(pool, settings, BrokeVerifyClient(credits=0))
+
+        # one alert despite two 402s; watch job armed exactly once
+        assert hook.call_count == 1
+        text = json.loads(hook.calls[0].request.read())["text"]
+        assert "<!channel>" in text and "<@U0RYAN>" in text and "OUT OF CREDITS" in text
+        watch = await pool.fetchval(
+            "select count(*) from jobs where name='verify_credit_watch' "
+            "and state in ('created','active')")
+        assert watch == 1
+        # submit jobs completed, not left to retry-spin
+        assert await pool.fetchval(
+            "select count(*) from jobs where name='verify_submit' "
+            "and state='created'") == 0
+
+
+async def test_credit_watch_resumes_when_credits_return(pool):
+    import httpx
+    import respx
+    with respx.mock:
+        hook = respx.post("https://hooks.slack.test/alert").mock(
+            return_value=httpx.Response(200))
+        cid = await seed_campaign(pool, [])
+        await _queue_send(pool, cid, "held@x.com")
+        settings = make_settings(alert_webhook_url="https://hooks.slack.test/alert")
+
+        from app.services.jobs import enqueue
+        await enqueue(pool, "verify_credit_watch", {})
+
+        # still broke: watch re-enqueues itself, no submit jobs, no alert
+        await process_verification_jobs(pool, settings, BrokeVerifyClient(credits=0))
+        assert await pool.fetchval(
+            "select count(*) from jobs where name='verify_credit_watch' "
+            "and state='created'") == 1
+        assert hook.call_count == 0
+
+        # top-up arrives: watch resumes the held campaign and stands down.
+        # (Client still 402s on create_batch, but the watch only checks credits.)
+        # Force the re-enqueued watch job due now:
+        await pool.execute(
+            "update jobs set start_after=now() where name='verify_credit_watch'")
+        await process_verification_jobs(pool, settings, BrokeVerifyClient(credits=5000))
+        submits = await pool.fetchval(
+            "select count(*) from jobs where name='verify_submit'")
+        assert submits >= 1
+        assert hook.call_count >= 1
+        resumed = json.loads(hook.calls[-1].request.read())["text"]
+        assert "credits are back" in resumed
