@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from app.services.dispatch import send_seed
 from app.services.jobs import enqueue
 from app.services.reports import campaign_report
 from app.services.resend_client import ResendClient
+from app.services.verification import (request_verification, unverified_count,
+                                       verification_summary)
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +34,7 @@ Workflow you must follow, in order:
    - Personalization: {{first_name}} (fallback "there") is substituted per recipient.
    - {{unsubscribe_url}} and {{preferences_url}} are substituted automatically per
      recipient and MUST appear in the footer, along with the postal address line
-     'Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia'. Campaigns
+     'Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US'. Campaigns
      missing either are rejected by the tools.
    - Only reference images that actually exist: the three brand asset URLs in the
      guide, YouTube thumbnails (https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg
@@ -45,23 +48,56 @@ Workflow you must follow, in order:
    Write tight, useful copy — no hype. Show the user your draft copy in chat before
    creating the campaign, and iterate until they're happy. After a seed test, offer to
    iterate on the design with update_campaign (which requires a fresh seed test).
-3. create_campaign, then sync_audience and report the audience size.
+3. create_campaign, then sync_audience and report the audience size AND the country
+   breakdown it returns (plus how many contacts have an explicit timezone).
+   sync_audience also starts deliverability verification (Emailable) and returns its
+   status — report it. Large audiences need a human to click Verify (paid, cost gate).
+   Each email is verified at most once ever (verdicts are permanent, never re-billed).
+   Only verified-valid emails are ever sent to; propose_send stays blocked until every
+   audience email has a verdict (check verification_status for progress).
 4. send_seed_test and tell the user to check their inbox.
-5. Only after the user confirms the seed email looks good: propose_send. Ask when it
-   should go out (immediately or a scheduled time). propose_send posts approval buttons —
-   a human must click Send; you can never dispatch directly.
+5. Only after the user confirms the seed email looks good: propose_send. Ask two things:
+   - WHEN it should go out (immediately or a scheduled time).
+   - HOW: all at once (one Resend broadcast — no volume limit), or RAMPED with per_day
+     and/or per_hour limits. Ramped sends are timezone-targeted: each contact gets the
+     email at the ideal local hour (default 10am) in their timezone, resolved from the
+     GHL contact's timezone field, else their country, else assumed US. Sending
+     continues for up to 8 hours past the ideal hour each day, then rolls to the next
+     day — so with only a per_hour limit, roughly 8×per_hour can go out per day.
+     Recommend a ramp for the first large send on this domain (deliverability), and
+     use the country breakdown to tell the user when their audience will receive it.
+   propose_send posts approval buttons — a human must click Send; you can never
+   dispatch directly.
+
+WEEKLY REVIEW (when a message asks you to run the weekly marketing review):
+you are the marketing manager. Pull campaign_history, tag_stats,
+engagement_segments, sales_activity and recent_meetings. Post ONE short analysis
+message: what worked, what's decaying, what prospects are asking about (meetings
++ conversations), and the sendable audience inventory. Then propose 1-2
+campaigns MAX with a clear goal each (bookings, reactivation, launch
+follow-up), draft them fully per the brand guide, run seed tests, and finish
+with propose_send + a one-line "why this, why now" per campaign. Do not email
+an audience that received a campaign in the last 7 days unless engagement data
+justifies it. If a data source is unavailable, say so in one line and plan
+without it.
 
 Rules:
 - Never skip the seed test. Never call propose_send before send_seed_test succeeded.
-- Daily send cap and deliverability kill rules are enforced by the pipeline; if asked,
-  the current cap is in your context below.
+- There is NO hard cap on campaign size: a broadcast sends everything at once, and a
+  ramp uses whatever per_day/per_hour the user picks. Never tell the user a campaign
+  is impossible because of a cap. The daily send cap in your context only limits the
+  per-email drip queue (GHL enrollments); deliverability kill rules still pause
+  everything on bounce spikes.
+- If a campaign was paused by the deliverability guardrail, fix the cause first
+  (usually: verify the audience), then resume_campaign — it posts confirm buttons
+  and a human must click Resume.
 - Keep Slack replies short and skimmable. Use plain language.
 - If a tool returns an error, explain it briefly and suggest the fix."""
 
 
 BRAND_GUIDE = (Path(__file__).parent / "brand_guide.md").read_text()
 
-REQUIRED_ADDRESS_MARKER = "Woonona"
+REQUIRED_ADDRESS_MARKER = "Boulder"
 
 
 def validate_custom_html(content: dict) -> str | None:
@@ -73,7 +109,7 @@ def validate_custom_html(content: dict) -> str | None:
         return "html_body must include {{unsubscribe_url}} in the footer"
     if REQUIRED_ADDRESS_MARKER not in html:
         return ("footer must include the postal address line: "
-                "Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia")
+                "Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US")
     return None
 
 
@@ -133,19 +169,64 @@ TOOLS = [
           ["days", "tag"]),
     _tool("segment_progress",
           "Counts of pending/completed background tagging jobs.", {}, []),
+    _tool("verification_status",
+          "Deliverability-verification progress for the campaign audience: counts by "
+          "verdict (valid/invalid/risky/unknown) plus how many emails still lack a "
+          "fresh verdict.",
+          {"campaign_id": {"type": "string"}}, ["campaign_id"]),
+    _tool("campaign_history",
+          "Performance of all campaigns in the last N days (default 90): audience, "
+          "sent/delivered/opened/clicked/bounced/complained counts. Use for the "
+          "weekly review and before proposing anything new.",
+          {"days": {"type": "integer", "minimum": 7, "maximum": 365}}, []),
+    _tool("tag_stats",
+          "Audience inventory: contact counts per GHL tag with how many are "
+          "verified-sendable. Use to pick real audiences.", {}, []),
+    _tool("engagement_segments",
+          "Warm segments: counts of contacts carrying opened-*/clicked-* engagement "
+          "tags per past campaign — who is warm, on which topic.", {}, []),
+    _tool("sales_activity",
+          "Sales-calendar bookings and CRM conversation volume for the last N days "
+          "(default 90). The strongest what-to-promote signal.",
+          {"days": {"type": "integer", "minimum": 7, "maximum": 180}}, []),
+    _tool("recent_meetings",
+          "Summaries and topics from the team's meetings (Resonance notetaker) for "
+          "the last N days (default 7): what prospects asked, objections, launches.",
+          {"days": {"type": "integer", "minimum": 1, "maximum": 30}}, []),
+    _tool("resume_campaign",
+          "Resume a campaign paused by the deliverability guardrail. Posts confirm "
+          "buttons — a human must click Resume; the campaign returns to 'ready' and "
+          "still needs propose_send + approval to actually dispatch.",
+          {"campaign_id": {"type": "string"}}, ["campaign_id"]),
     _tool("propose_send",
           "Post the approval buttons for dispatch. Requires a prior successful seed test. "
-          "when_iso: ISO-8601 datetime with timezone offset, omit to send immediately.",
-          {"campaign_id": {"type": "string"}, "when_iso": {"type": "string"}},
+          "when_iso: ISO-8601 datetime with timezone offset, omit to send immediately. "
+          "Omit per_day AND per_hour to send everything at once as one Resend broadcast. "
+          "Set per_day and/or per_hour to ramp instead: sends then go out at the ideal "
+          "local hour in each contact's timezone (GHL timezone, else country, else US).",
+          {"campaign_id": {"type": "string"}, "when_iso": {"type": "string"},
+           "per_day": {"type": "integer", "minimum": 1,
+                       "description": "max emails per day for this campaign"},
+           "per_hour": {"type": "integer", "minimum": 1,
+                        "description": "max emails per hour for this campaign"}},
           ["campaign_id"]),
 ]
 
 
 def approval_blocks(campaign_id: str, name: str, subject: str, audience: int,
-                    when_iso: str | None) -> list:
-    value = json.dumps({"campaign_id": campaign_id, "when": when_iso})
+                    when_iso: str | None, per_day: int | None = None,
+                    per_hour: int | None = None) -> list:
+    value = json.dumps({"campaign_id": campaign_id, "when": when_iso,
+                        "per_day": per_day, "per_hour": per_hour})
+    if per_day or per_hour:
+        limits = " · ".join(filter(None, [f"{per_day}/day" if per_day else None,
+                                          f"{per_hour}/hour" if per_hour else None]))
+        how = f"ramped ({limits}), at the ideal local time per contact"
+    else:
+        how = "one broadcast, all at once"
     summary = (f"*Ready to send:* {name}\n*Subject:* {subject}\n"
-               f"*Audience:* {audience} contacts\n*When:* {when_iso or 'immediately'}")
+               f"*Audience:* {audience} contacts\n*How:* {how}\n"
+               f"*When:* {when_iso or 'immediately'}")
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
         {"type": "actions", "elements": [
@@ -157,18 +238,53 @@ def approval_blocks(campaign_id: str, name: str, subject: str, audience: int,
     ]
 
 
+def verify_approval_blocks(campaign_id: str, count: int, est_cost: float) -> list:
+    value = json.dumps({"campaign_id": campaign_id, "count": count})
+    summary = (f"*Verification needed:* {count} audience emails have no fresh "
+               f"deliverability verdict.\nEstimated cost: *${est_cost:.2f}* "
+               f"(Emailable). Sends stay blocked until the audience is verified.")
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
+        {"type": "actions", "elements": [
+            {"type": "button", "style": "primary", "action_id": "approve_verify",
+             "text": {"type": "plain_text", "text": "Verify"}, "value": value},
+            {"type": "button", "style": "danger", "action_id": "cancel_verify",
+             "text": {"type": "plain_text", "text": "Not now"}, "value": value},
+        ]},
+    ]
+
+
+def resume_blocks(campaign_id: str, name: str) -> list:
+    value = json.dumps({"campaign_id": campaign_id})
+    summary = (f"*Resume paused campaign:* {name}\nIt was paused by the "
+               "deliverability guardrail. Resuming returns it to 'ready' — it still "
+               "needs a send approval before anything goes out.")
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary}},
+        {"type": "actions", "elements": [
+            {"type": "button", "style": "primary", "action_id": "approve_resume",
+             "text": {"type": "plain_text", "text": "Resume"}, "value": value},
+            {"type": "button", "style": "danger", "action_id": "cancel_resume",
+             "text": {"type": "plain_text", "text": "Keep paused"}, "value": value},
+        ]},
+    ]
+
+
 class BotEngine(BaseBot):
     """Email campaign persona."""
 
     system_prompt = SYSTEM_PROMPT
     tools = TOOLS
 
-    def __init__(self, pool, settings: Settings, ghl, slack, resend, client=None):
+    def __init__(self, pool, settings: Settings, ghl, slack, resend, client=None,
+                 resonance=None):
         super().__init__(pool, settings, ghl, slack, client=client)
         self._resend = resend or ResendClient(settings.resend_api_key, rps=settings.send_rps)
+        self._resonance = resonance
 
     def _system(self) -> str:
-        return (f"{super()._system()} Daily send cap: {self._settings.daily_send_cap}."
+        return (f"{super()._system()} Daily send cap (drip queue only — campaign "
+                f"broadcasts are uncapped): {self._settings.daily_send_cap}."
                 f"\n\n=== EMAIL BRAND GUIDE ===\n\n{BRAND_GUIDE}")
 
     async def _run_tool(self, name: str, args: dict):
@@ -215,7 +331,20 @@ class BotEngine(BaseBot):
                     args["campaign_id"], json.dumps(args["content"]))
             return {"updated": True, "note": "content change resets the seed-test requirement"}
         if name == "sync_audience":
-            return await sync_audience(pool, self._ghl, args["campaign_id"])
+            result = await sync_audience(pool, self._ghl, args["campaign_id"])
+            verification = await request_verification(
+                pool, self._settings, uuid.UUID(args["campaign_id"]))
+            if verification["status"] == "needs_approval":
+                await self._slack.post_message(
+                    self._turn_context["channel"],
+                    text="Verification approval needed",
+                    blocks=verify_approval_blocks(
+                        args["campaign_id"], verification["unverified"],
+                        verification["est_cost"]),
+                    thread_ts=self._turn_context["thread_ts"])
+                verification["note"] = ("approval buttons posted; a human must click "
+                                        "Verify before this audience can be checked")
+            return {**result, "verification": verification}
         if name == "send_seed_test":
             campaign = await pool.fetchrow(
                 "select * from campaigns where id=$1::uuid", args["campaign_id"])
@@ -254,6 +383,99 @@ class BotEngine(BaseBot):
                 "select state, count(*) as n from jobs where name='ghl_writeback' "
                 "group by state")
             return {r["state"]: r["n"] for r in rows} or {"idle": True}
+        if name == "verification_status":
+            return await verification_summary(pool, uuid.UUID(args["campaign_id"]))
+        if name == "campaign_history":
+            days = args.get("days", 90)
+            rows = await pool.fetch(
+                """select c.name, c.status, c.send_via, c.audience_filter,
+                          c.created_at::date::text as created,
+                          count(distinct s.id) filter (where s.status='sent') as sent,
+                          count(distinct e.send_id) filter (where e.type='email.delivered') as delivered,
+                          count(distinct e.send_id) filter (where e.type='email.opened') as opened,
+                          count(distinct e.send_id) filter (where e.type='email.clicked') as clicked,
+                          count(distinct e.send_id) filter (where e.type='email.bounced') as bounced,
+                          count(distinct e.send_id) filter (where e.type='email.complained') as complained
+                   from campaigns c
+                   left join sends s on s.campaign_id = c.id
+                   left join events e on e.send_id = s.id
+                   where c.created_at > now() - make_interval(days => $1)
+                   group by c.id order by c.created_at desc""", days)
+            out = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    filters = json.loads(d.pop("audience_filter") or "[]")
+                    d["audience_tag"] = filters[0]["value"] if filters else None
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    d["audience_tag"] = None
+                out.append(d)
+            return {"campaigns": out}
+        if name == "tag_stats":
+            rows = await pool.fetch(
+                """select tag, count(*) as contacts,
+                          count(*) filter (where exists
+                              (select 1 from email_verifications v
+                               where v.email = c.email and v.verdict = 'valid')) as sendable
+                   from contacts_cache c, unnest(c.tags) as tag
+                   where tag not like 'opened-%' and tag not like 'clicked-%'
+                     and tag not like 'emailed-%'
+                   group by tag order by contacts desc limit 40""")
+            return {"tags": [dict(r) for r in rows]}
+        if name == "engagement_segments":
+            rows = await pool.fetch(
+                """select tag, count(*) as contacts
+                   from contacts_cache c, unnest(c.tags) as tag
+                   where tag like 'opened-%' or tag like 'clicked-%'
+                   group by tag order by contacts desc limit 30""")
+            return {"segments": [dict(r) for r in rows]}
+        if name == "sales_activity":
+            days = args.get("days", 90)
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            start_ms = now_ms - days * 86_400_000
+            result: dict = {"days": days}
+            try:
+                calendars = await self._ghl.list_calendars()
+                appointments = []
+                for cal in calendars:
+                    events = await self._ghl.calendar_events(
+                        cal.get("id") or cal.get("_id"), start_ms, now_ms)
+                    appointments.append({"calendar": cal.get("name"),
+                                         "booked": len(events)})
+                result["appointments_by_calendar"] = appointments
+                result["appointments_total"] = sum(a["booked"] for a in appointments)
+            except Exception as exc:
+                result["appointments"] = (f"unavailable ({str(exc)[:120]}) — "
+                                          "PIT may lack calendars.readonly scope")
+            convo_count = 0
+            async for _ in self._ghl.search_conversations(start_ms):
+                convo_count += 1
+                if convo_count >= 500:
+                    break
+            result["conversations"] = (f"{convo_count}+" if convo_count >= 500
+                                       else convo_count)
+            return result
+        if name == "recent_meetings":
+            if self._resonance is None:
+                return {"unavailable": "RESONANCE_API_KEY/RESONANCE_API_URL not "
+                                       "set on the worker — planning without "
+                                       "meeting data"}
+            meetings = await self._resonance.recent_meetings(args.get("days", 7))
+            return {"meetings": meetings[:25]}
+        if name == "resume_campaign":
+            campaign = await pool.fetchrow(
+                "select id, name, status from campaigns where id=$1::uuid",
+                args["campaign_id"])
+            if campaign is None:
+                return {"error": "campaign not found"}
+            if campaign["status"] != "paused":
+                return {"error": f"campaign is not paused (status: {campaign['status']})"}
+            await self._slack.post_message(
+                self._turn_context["channel"], text="Resume paused campaign?",
+                blocks=resume_blocks(str(campaign["id"]), campaign["name"]),
+                thread_ts=self._turn_context["thread_ts"])
+            return {"posted": True, "note": "confirm buttons posted; a human must "
+                                            "click Resume"}
         if name == "propose_send":
             campaign = await pool.fetchrow(
                 "select * from campaigns where id=$1::uuid", args["campaign_id"])
@@ -262,10 +484,25 @@ class BotEngine(BaseBot):
             if campaign["seed_tested_at"] is None:
                 return {"error": "seed test required before sending — call send_seed_test "
                                  "and have the user check the email first"}
+            unverified = await unverified_count(pool, campaign["id"])
+            if unverified:
+                return {"error": f"{unverified} audience emails are unverified — "
+                                 "verification must finish before sending (check "
+                                 "verification_status; run sync_audience if it never "
+                                 "started)"}
+            # count only who will actually receive it: verified-valid, not
+            # suppressed, not dnd — the same filter every send path applies
             audience = await pool.fetchval(
-                "select count(*) from campaign_contacts where campaign_id=$1", campaign["id"])
+                """select count(*) from campaign_contacts cc
+                   join contacts_cache c using (ghl_contact_id)
+                   where cc.campaign_id = $1 and c.dnd = false
+                     and not exists (select 1 from suppressions s where s.email = c.email)
+                     and exists (select 1 from email_verifications v
+                                 where v.email = c.email and v.verdict = 'valid')""",
+                campaign["id"])
             blocks = approval_blocks(str(campaign["id"]), campaign["name"],
-                                     campaign["subject"], audience, args.get("when_iso"))
+                                     campaign["subject"], audience, args.get("when_iso"),
+                                     args.get("per_day"), args.get("per_hour"))
             await self._slack.post_message(
                 self._turn_context["channel"], text="Campaign ready for approval",
                 blocks=blocks, thread_ts=self._turn_context["thread_ts"])

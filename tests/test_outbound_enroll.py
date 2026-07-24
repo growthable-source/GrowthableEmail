@@ -6,7 +6,7 @@ import respx
 from app.services.dispatch import process_send_queue
 from app.services.resend_client import ResendClient
 from app.services.suppressions import add_suppression
-from tests.helpers import make_settings
+from tests.helpers import make_settings, verify_all_contacts
 
 RESEND_API = "https://api.resend.com/emails"
 
@@ -67,6 +67,7 @@ async def test_dispatch_sends_override_with_personal_subject(pool, client):
     route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_9"}))
     cid = await seed_outbound_campaign(pool)
     await client.post("/outbound/enroll", json=enroll_body(cid))
+    await verify_all_contacts(pool)   # dispatch gate needs a 'valid' verdict
     settings = make_settings()
     sent = await process_send_queue(pool, settings, ResendClient("re_test", rps=10_000, backoff_base=0))
     assert sent == 1
@@ -85,6 +86,7 @@ async def test_dispatch_time_suppression_still_applies_to_overrides(pool, client
     respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_9"}))
     cid = await seed_outbound_campaign(pool)
     await client.post("/outbound/enroll", json=enroll_body(cid))
+    await verify_all_contacts(pool)   # dispatch gate needs a 'valid' verdict
     # address gets suppressed between enroll and dispatch
     await add_suppression(pool, "front.desk@desertglow.com", reason="ghl_dnd", source="ghl")
     settings = make_settings()

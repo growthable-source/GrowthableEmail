@@ -53,3 +53,7 @@ services:
         sync: false
       - key: DAILY_REPORT_HOUR
         value: "8"
+      - key: EMAILABLE_API_KEY
+        sync: false
+      - key: VERIFY_COST_PER_EMAIL
+        value: "0.0079"

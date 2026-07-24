@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     from_email: str
     send_rps: float = 2.0
     daily_send_cap: int = 500
+    ideal_send_hour: int = 10  # local hour timed sends target in each contact's timezone
     seed_emails: str = ""
     alert_webhook_url: str | None = None
     slack_enabled: bool = False
@@ -29,6 +30,14 @@ class Settings(BaseSettings):
     postal_address: str = ""   # CAN-SPAM physical address for outbound footers
     bot_timezone: str = "Australia/Sydney"
     daily_report_hour: int = 8  # local hour (bot_timezone) the daily digest posts after
+    emailable_api_key: str = ""
+    verify_approval_threshold: int = 1000  # verify runs above this need a human button-click
+    verify_cost_per_email: float = 0.0038  # USD, for the approval message estimate
+    weekly_review_enabled: bool = True
+    weekly_review_dow: int = 0   # 0=Monday (bot_timezone)
+    weekly_review_hour: int = 9  # local hour the weekly review kicks off after
+    resonance_api_key: str = ""
+    resonance_api_url: str = ""
 
     @property
     def seed_list(self) -> list[str]:

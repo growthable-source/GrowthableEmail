@@ -3,11 +3,12 @@ import respx
 
 import json as _json
 
-from app.services.dispatch import (enqueue_campaign_sends, process_send_queue,
-                                   promote_scheduled, requeue_stale)
+from app.services.dispatch import (add_utm_params, enqueue_campaign_sends,
+                                   process_send_queue, promote_scheduled,
+                                   requeue_stale)
 from app.services.resend_client import ResendClient
 from app.services.suppressions import add_suppression
-from tests.helpers import make_settings
+from tests.helpers import make_settings, verify_all_contacts
 
 RESEND_API = "https://api.resend.com/emails"
 
@@ -23,6 +24,7 @@ async def seed_campaign(pool, n_contacts=3, status="ready"):
         await pool.execute(
             "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, $2)",
             cid, f"c{i}")
+    await verify_all_contacts(pool)
     return cid
 
 
@@ -117,6 +119,7 @@ async def test_campaign_content_merged_into_render_props(pool):
         "insert into contacts_cache (ghl_contact_id, email, first_name) values ('c0', 'u@x.co', 'Ada')")
     await pool.execute(
         "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c0')", cid)
+    await verify_all_contacts(pool)
     await enqueue_campaign_sends(pool, cid)
     sent = await process_send_queue(pool, make_settings(),
                                     ResendClient("re", rps=10_000, backoff_base=0))
@@ -139,7 +142,7 @@ async def test_promote_scheduled_when_due(pool):
 
 
 FULL_DOC = ("<!DOCTYPE html><html><body><h1>Bespoke {{first_name}}!</h1>"
-            "<p>Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · "
+            "<p>Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US · "
             '<a href="{{unsubscribe_url}}">Unsubscribe</a></p></body></html>')
 
 
@@ -154,6 +157,7 @@ async def test_custom_full_document_personalized_and_unsub_substituted(pool):
         "insert into contacts_cache (ghl_contact_id, email, first_name) values ('c0', 'u@x.co', 'Ada')")
     await pool.execute(
         "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c0')", cid)
+    await verify_all_contacts(pool)
     await enqueue_campaign_sends(pool, cid)
     sent = await process_send_queue(pool, make_settings(),
                                     ResendClient("re", rps=10_000, backoff_base=0))
@@ -164,6 +168,71 @@ async def test_custom_full_document_personalized_and_unsub_substituted(pool):
     assert "http://testserver/u/" in body["html"]      # real signed unsub link merged in
     assert "Bespoke Ada!" in body["text"]              # plain-text part generated
     assert "List-Unsubscribe" in str(body["headers"])  # headers still applied
+
+
+# --- UTM link tagging -------------------------------------------------------
+
+SKIP_HOST = "testserver"  # matches make_settings().public_base_url host
+
+
+def test_utm_tags_plain_external_link():
+    out = add_utm_params('<a href="https://growthable.io/co-pilot/">x</a>',
+                         "july-launch", SKIP_HOST)
+    assert ('href="https://growthable.io/co-pilot/?'
+            "utm_source=newsletter&utm_medium=email&utm_campaign=july-launch"'"') in out
+
+
+def test_utm_preserves_existing_query_and_fragment():
+    out = add_utm_params('<a href="https://g.io/p?ref=x#pricing">x</a>',
+                         "camp", SKIP_HOST)
+    assert "ref=x" in out and "utm_campaign=camp" in out
+    assert out.index("#pricing") > out.index("utm_campaign=camp")  # fragment stays last
+
+
+def test_utm_skips_our_own_unsub_and_preferences_links():
+    # after substitution these point at public_base_url — must not be tagged
+    html = ('<a href="http://testserver/u/tok">Unsubscribe</a>'
+            '<a href="http://testserver/u/tok">Preferences</a>')
+    assert add_utm_params(html, "camp", SKIP_HOST) == html
+
+
+def test_utm_skips_non_http_links():
+    html = '<a href="mailto:hi@x.co">m</a><a href="#top">a</a><a href="tel:+1">t</a>'
+    assert add_utm_params(html, "camp", SKIP_HOST) == html
+
+
+def test_utm_does_not_double_tag():
+    once = add_utm_params('<a href="https://g.io/">x</a>', "camp", SKIP_HOST)
+    twice = add_utm_params(once, "camp", SKIP_HOST)
+    assert once == twice
+    assert twice.count("utm_source=newsletter") == 1
+
+
+@respx.mock
+async def test_send_path_tags_links_but_not_unsub(pool):
+    doc = ('<!DOCTYPE html><html><body>'
+           '<a href="https://growthable.io/co-pilot/">Co-Pilot</a>'
+           '<a href="{{unsubscribe_url}}">Unsubscribe</a></body></html>')
+    route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em_1"}))
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status, content) "
+        "values ('July Launch', 'S', 'custom', 'v1', 'ready', $1) returning id",
+        _json.dumps({"html_body": doc}))
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('c0', 'u@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c0')", cid)
+    await verify_all_contacts(pool)
+    await enqueue_campaign_sends(pool, cid)
+    sent = await process_send_queue(pool, make_settings(),
+                                    ResendClient("re", rps=10_000, backoff_base=0))
+    assert sent == 1
+    html = _json.loads(route.calls[0].request.read())["html"]
+    assert "utm_source=newsletter&utm_medium=email&utm_campaign=july-launch" in html
+    assert "http://testserver/u/" in html               # unsub still merged
+    assert "/u/tok" not in html
+    # the unsub link itself carries no utm
+    assert "utm_source" not in html.split('href="http://testserver')[1].split('"')[0]
 
 
 @respx.mock
@@ -177,7 +246,28 @@ async def test_custom_missing_unsub_token_never_sends(pool):
         "insert into contacts_cache (ghl_contact_id, email) values ('c0', 'u@x.co')")
     await pool.execute(
         "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c0')", cid)
+    await verify_all_contacts(pool)
     await enqueue_campaign_sends(pool, cid)
     sent = await process_send_queue(pool, make_settings(),
                                     ResendClient("re", rps=10_000, backoff_base=0))
     assert sent == 0 and not route.called  # compliance backstop: nothing goes out
+
+
+@respx.mock
+async def test_claim_skips_sends_without_valid_verdict(pool):
+    """Last-gate check: even rows already IN the queue don't send without a
+    current valid verdict (revived stale queues, post-queue bounces)."""
+    route = respx.post(RESEND_API).mock(return_value=httpx.Response(200, json={"id": "em"}))
+    cid = await seed_campaign(pool, n_contacts=2, status="dispatching")
+    await pool.execute(
+        "insert into sends (campaign_id, ghl_contact_id, email) values "
+        "($1, 'c0', 'user0@x.co'), ($1, 'c1', 'user1@x.co')", cid)
+    # user1's verdict flips to invalid AFTER queueing (e.g. bounced elsewhere)
+    await pool.execute(
+        "update email_verifications set verdict='invalid' where email='user1@x.co'")
+    sent = await process_send_queue(pool, make_settings(),
+                                    ResendClient("re", rps=10_000, backoff_base=0))
+    assert sent == 1
+    assert route.calls.call_count == 1
+    assert (await pool.fetchval(
+        "select status from sends where email='user1@x.co'")) == "queued"  # never claimed

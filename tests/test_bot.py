@@ -123,7 +123,8 @@ async def test_propose_send_posts_approval_buttons_after_seed(pool):
     action_ids = [e["action_id"] for e in buttons["blocks"][-1]["elements"]]
     assert action_ids == ["approve_send", "cancel_send"]
     value = json.loads(buttons["blocks"][-1]["elements"][0]["value"])
-    assert value == {"campaign_id": str(cid), "when": "2026-07-10T09:00:00+10:00"}
+    assert value == {"campaign_id": str(cid), "when": "2026-07-10T09:00:00+10:00",
+                     "per_day": None, "per_hour": None}
 
 
 async def test_claude_error_posts_apology_and_completes_job(pool):
@@ -147,7 +148,7 @@ async def test_process_bot_turns_drains_queue(pool):
 
 
 VALID_DOC = ("<!DOCTYPE html><html><body><h1>Hi {{first_name}}</h1>"
-             "<p>Growthable LLC · 27 Red Ash Drive, Woonona NSW 2517, Australia · "
+             "<p>Growthable LLC · 1942 Broadway St STE 314C, Boulder CO 80302, US · "
              '<a href="{{unsubscribe_url}}">Unsubscribe</a></p></body></html>')
 
 
@@ -210,3 +211,182 @@ async def test_segment_progress_reports_job_states(pool):
     await engine.handle_turn(TURN)
     result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
     assert result == {"created": 1}
+
+
+async def test_propose_send_blocked_until_verified(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, seed_tested_at) "
+        "values ('July', 'Big', 'newsletter', 'v1', now()) returning id")
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('c1', 'u@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c1')", cid)
+    engine, slack = make_engine(pool, [
+        [tool_block("propose_send", {"campaign_id": str(cid)})],
+        [text_block("Verification still pending.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "unverified" in result["error"]
+    assert all(p["blocks"] is None for p in slack.posts)  # no approval buttons posted
+
+
+async def test_propose_send_audience_counts_only_verified_valid(pool):
+    from app.services.verification import upsert_verdicts
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, seed_tested_at) "
+        "values ('July', 'Big', 'newsletter', 'v1', now()) returning id")
+    for i, verdict in enumerate(["valid", "risky"]):
+        await pool.execute(
+            "insert into contacts_cache (ghl_contact_id, email) values ($1, $2)",
+            f"c{i}", f"u{i}@x.co")
+        await pool.execute(
+            "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, $2)",
+            cid, f"c{i}")
+        await upsert_verdicts(pool, [(f"u{i}@x.co", verdict, "x")])
+    engine, slack = make_engine(pool, [
+        [tool_block("propose_send", {"campaign_id": str(cid)})],
+        [text_block("Awaiting approval.")],
+    ])
+    await engine.handle_turn(TURN)
+    buttons = next(p for p in slack.posts if p["blocks"])
+    # both contacts verified (no gate error), but only the valid one is counted
+    assert "*Audience:* 1 contacts" in buttons["blocks"][0]["text"]["text"]
+
+
+async def test_verification_status_tool(pool):
+    from app.services.verification import upsert_verdicts
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version) "
+        "values ('July', 'Big', 'newsletter', 'v1') returning id")
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email) values ('c1', 'u@x.co')")
+    await pool.execute(
+        "insert into campaign_contacts (campaign_id, ghl_contact_id) values ($1, 'c1')", cid)
+    await upsert_verdicts(pool, [("u@x.co", "valid", "ok")])
+    engine, slack = make_engine(pool, [
+        [tool_block("verification_status", {"campaign_id": str(cid)})],
+        [text_block("All verified.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert result == {"valid": 1, "unverified": 0}
+
+
+async def test_resume_campaign_posts_confirm_buttons(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status) "
+        "values ('July', 'Big', 'newsletter', 'v1', 'paused') returning id")
+    engine, slack = make_engine(pool, [
+        [tool_block("resume_campaign", {"campaign_id": str(cid)})],
+        [text_block("Confirm to resume.")],
+    ])
+    await engine.handle_turn(TURN)
+    buttons = next(p for p in slack.posts if p["blocks"])
+    action_ids = [e["action_id"] for e in buttons["blocks"][-1]["elements"]]
+    assert action_ids == ["approve_resume", "cancel_resume"]
+    # still paused until a human clicks
+    assert (await pool.fetchval("select status from campaigns where id=$1", cid)) == "paused"
+
+
+async def test_resume_campaign_rejects_unpaused(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, status) "
+        "values ('July', 'Big', 'newsletter', 'v1', 'ready') returning id")
+    engine, slack = make_engine(pool, [
+        [tool_block("resume_campaign", {"campaign_id": str(cid)})],
+        [text_block("Not paused.")],
+    ])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "not paused" in result["error"]
+    assert all(p["blocks"] is None for p in slack.posts)
+
+
+# --- weekly-review data tools ------------------------------------------------
+
+async def test_campaign_history_rolls_up_events(pool):
+    cid = await pool.fetchval(
+        "insert into campaigns (name, subject, template_ref, template_version, "
+        "audience_filter) values ('Hist', 's', 'custom', 'v1', $1) returning id",
+        json.dumps([{"field": "tags", "operator": "eq", "value": "newsactive"}]))
+    sid = await pool.fetchval(
+        "insert into sends (campaign_id, ghl_contact_id, email, status, sent_at) "
+        "values ($1, 'c1', 'u@x.co', 'sent', now()) returning id", cid)
+    for etype in ("email.delivered", "email.opened", "email.opened", "email.clicked"):
+        await pool.execute(
+            "insert into events (send_id, type) values ($1, $2)", sid, etype)
+    engine, _ = make_engine(pool, [
+        [tool_block("campaign_history", {})], [text_block("done")]])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    camp = result["campaigns"][0]
+    assert camp["name"] == "Hist" and camp["audience_tag"] == "newsactive"
+    assert (camp["sent"], camp["delivered"], camp["opened"], camp["clicked"]) == (1, 1, 1, 1)
+
+
+async def test_tag_stats_and_engagement_segments(pool):
+    from app.services.verification import upsert_verdicts
+    await pool.execute(
+        "insert into contacts_cache (ghl_contact_id, email, tags) values "
+        "('c1', 'a@x.co', array['newsactive', 'opened-july-launch']), "
+        "('c2', 'b@x.co', array['newsactive']), "
+        "('c3', 'e@x.co', array['vip', 'clicked-july-launch'])")
+    await upsert_verdicts(pool, [("a@x.co", "valid", "ok"), ("b@x.co", "risky", "role")])
+    engine, _ = make_engine(pool, [
+        [tool_block("tag_stats", {}, id="t1"),
+         tool_block("engagement_segments", {}, id="t2")],
+        [text_block("done")]])
+    await engine.handle_turn(TURN)
+    results = engine._client.requests[1]["messages"][-1]["content"]
+    tags = json.loads(results[0]["content"])["tags"]
+    news = next(t for t in tags if t["tag"] == "newsactive")
+    assert news["contacts"] == 2 and news["sendable"] == 1
+    assert all(not t["tag"].startswith("opened-") for t in tags)
+    segments = json.loads(results[1]["content"])["segments"]
+    assert {s["tag"] for s in segments} == {"opened-july-launch", "clicked-july-launch"}
+
+
+async def test_sales_activity_degrades_without_calendar_scope(pool):
+    class CalGHL(FakeGHL):
+        async def list_calendars(self):
+            raise RuntimeError("401 scope missing")
+
+        async def search_conversations(self, last_message_after_ms, page_limit=50):
+            for i in range(3):
+                yield {"contact_id": f"c{i}", "last_message_date": 99}
+
+    slack = FakeSlack()
+    engine = BotEngine(pool=pool, settings=make_settings(), ghl=CalGHL(), slack=slack,
+                       resend=None, client=FakeAnthropic([
+                           [tool_block("sales_activity", {"days": 30})],
+                           [text_block("done")]]))
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "unavailable" in result["appointments"]
+    assert result["conversations"] == 3
+
+
+async def test_recent_meetings_unavailable_without_key(pool):
+    engine, _ = make_engine(pool, [
+        [tool_block("recent_meetings", {})], [text_block("done")]])
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert "unavailable" in result
+
+
+async def test_recent_meetings_with_client(pool):
+    class FakeResonance:
+        async def recent_meetings(self, days=7):
+            return [{"title": "Sales sync", "summary": "Everyone wants the portal",
+                     "topics": ["portal", "pricing"]}]
+
+    slack = FakeSlack()
+    engine = BotEngine(pool=pool, settings=make_settings(), ghl=FakeGHL(), slack=slack,
+                       resend=None, resonance=FakeResonance(),
+                       client=FakeAnthropic([
+                           [tool_block("recent_meetings", {"days": 7})],
+                           [text_block("done")]]))
+    await engine.handle_turn(TURN)
+    result = json.loads(engine._client.requests[1]["messages"][-1]["content"][0]["content"])
+    assert result["meetings"][0]["title"] == "Sales sync"

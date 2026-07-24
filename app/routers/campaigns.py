@@ -147,6 +147,17 @@ async def outbound_enroll(request: Request, body: OutboundEnrollIn):
         "update campaigns set status='dispatching' "
         "where id=$1 and status in ('draft','ready','completed')",
         campaign["id"])
+
+    # The dispatch claim gate only releases sends whose email has a 'valid'
+    # verdict (fail-safe by exclusion). The GHL flow requests verification at
+    # campaign start; the outbound engine enrolls one send at a time, so the
+    # request happens here. Drip volumes sit far below the approval threshold,
+    # so this always auto-submits; already-verified emails are never re-billed
+    # (verdicts are permanent). Without this call, outbound sends would queue
+    # forever.
+    from app.services.verification import request_verification
+    await request_verification(pool, request.app.state.settings, campaign["id"])
+
     if inserted is None:
         return {"enrolled": False, "reason": "already enrolled"}
     return {"enrolled": True, "send_id": str(inserted["id"])}

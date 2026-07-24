@@ -7,7 +7,7 @@ from app.services.dispatch import process_send_queue
 from app.services.domains import adjust_and_guard, pick_from
 from app.services.inbound import handle_received, process_reply_jobs
 from app.services.resend_client import ResendClient
-from tests.helpers import make_settings
+from tests.helpers import make_settings, verify_all_contacts
 from tests.test_outbound_enroll import enroll_body, seed_outbound_campaign
 
 RESEND_API = "https://api.resend.com/emails"
@@ -77,6 +77,7 @@ async def test_domain_pool_rotation_and_attribution(pool, client):
     await client.post("/outbound/domains", json={"domain": "mail.xoverahq.com"})
     cid = await seed_outbound_campaign(pool)
     await client.post("/outbound/enroll", json=enroll_body(cid))
+    await verify_all_contacts(pool)   # dispatch gate needs a 'valid' verdict
     settings = make_settings()
     sent = await process_send_queue(pool, settings, ResendClient("re_test", rps=10_000, backoff_base=0))
     assert sent == 1

@@ -23,7 +23,18 @@ async def build_email_stats(pool) -> dict:
         "select count(*) from campaigns where status in ('dispatching', 'scheduled')")
     completed = await pool.fetchval(
         "select count(*) from campaigns where status='completed' and created_at >= $1", since)
-    paused = await pool.fetch("select name from campaigns where status='paused'")
+    paused = await pool.fetch(
+        """select c.name,
+                  (select count(*) from sends s
+                   where s.campaign_id = c.id and s.status = 'queued') as queued
+           from campaigns c where c.status = 'paused'""")
+    ramps = await pool.fetch(
+        """select c.name,
+                  count(*) filter (where s.status='sent') as sent,
+                  count(*) filter (where s.status in ('queued', 'sending')) as remaining
+           from campaigns c join sends s on s.campaign_id = c.id
+           where c.status='dispatching' and c.send_via='timed'
+           group by c.id, c.name""")
     return {
         "sent": sends["sent"] or 0, "failed": sends["failed"] or 0,
         "delivered": event_counts.get("email.delivered", 0),
@@ -32,7 +43,10 @@ async def build_email_stats(pool) -> dict:
         "bounced": event_counts.get("email.bounced", 0),
         "complained": event_counts.get("email.complained", 0),
         "active_campaigns": active or 0, "completed_campaigns": completed or 0,
-        "paused_campaigns": [r["name"] for r in paused],
+        "paused_campaigns": [{"name": r["name"], "queued": r["queued"]}
+                             for r in paused],
+        "ramps": [{"name": r["name"], "sent": r["sent"], "remaining": r["remaining"]}
+                  for r in ramps],
     }
 
 
@@ -70,9 +84,18 @@ def format_email_report(stats: dict) -> str:
         f"Active campaigns: *{stats['active_campaigns']}*  ·  "
         f"Completed today: *{stats['completed_campaigns']}*",
     ]
-    if stats["paused_campaigns"]:
-        lines.append(f"⚠️ *Paused by guardrails:* {', '.join(stats['paused_campaigns'])} "
-                     "— needs a look.")
+    for ramp in stats.get("ramps", []):
+        total = ramp["sent"] + ramp["remaining"]
+        pct = ramp["sent"] * 100 // total if total else 0
+        lines.append(f"📤 *{ramp['name']}* ramp: {ramp['sent']:,}/{total:,} sent "
+                     f"({pct}%), {ramp['remaining']:,} to go.")
+    for p in stats["paused_campaigns"]:
+        if p["queued"]:
+            lines.append(f"⚠️ *Paused:* {p['name']} — {p['queued']:,} queued; "
+                         "auto-resumes overnight unless attempts are exhausted.")
+        else:
+            lines.append(f"⚠️ *Paused:* {p['name']} — nothing queued to send; "
+                         "ask me to resume or cancel it to clear this.")
     return "\n".join(lines)
 
 

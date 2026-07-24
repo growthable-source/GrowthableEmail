@@ -44,3 +44,14 @@ async def test_unknown_kind_dead_letters(pool):
         await process_writeback_jobs(pool, FakeGHL())
         await pool.execute("update jobs set start_after = now()")
     assert (await pool.fetchval("select state from jobs")) == "failed"
+
+
+async def test_drains_large_queue_in_one_pass(pool):
+    for i in range(25):
+        await enqueue(pool, "ghl_writeback",
+                      {"kind": "add_tags", "contact_id": f"c{i}", "tags": ["email-invalid"]})
+    ghl = FakeGHL()
+    assert await process_writeback_jobs(pool, ghl) == 25
+    assert len(ghl.calls) == 25
+    assert await pool.fetchval(
+        "select count(*) from jobs where state='completed'") == 25
